@@ -166,7 +166,7 @@ class Blip2VicunaDrive(Blip2Base):
         self.waypoints_loss = torch.nn.L1Loss()
         self.end_loss = torch.nn.CrossEntropyLoss()
 
-    def concat_text_image_input(self, input_embeds, input_atts, input_embeds, image_nums, end_flag_pos_list, image_atts=None):
+    def concat_text_image_input(self, input_embeds, input_atts, image_embeds, image_nums, end_flag_pos_list, image_atts=None):
         '''
         attention_mask:
             - 1 for tokens that are **not masked**,
@@ -176,16 +176,16 @@ class Blip2VicunaDrive(Blip2Base):
         llm_inputs = []
         llm_attention_mask = []
         wp_target_index = []
-        bs = input_embeds.size()[0]
+        bs = image_embeds.size()[0]
         for i in range(bs):
             this_input_ones = input_atts[i].sum()
             input_part_targets_len.append(this_input_ones)
             if image_atts is None:
-                bs, t, n, dim = input_embeds.size()
+                bs, t, n, dim = image_embeds.size()
                 llm_inputs.append(
                     torch.cat([
                         input_embeds[i][:this_input_ones],
-                        input_embeds[i].view(t*n, -1),
+                        image_embeds[i].view(t*n, -1),
                         input_embeds[i][this_input_ones:]
                     ])
                 )
@@ -193,17 +193,17 @@ class Blip2VicunaDrive(Blip2Base):
                 llm_inputs.append(
                     torch.cat([
                         input_embeds[i][:this_input_ones],
-                        input_embeds[i],
+                        image_embeds[i],
                         input_embeds[i][this_input_ones:]
                     ])
                 )
             if image_atts is None:
-                bs, t, n, dim = input_embeds.size()
+                bs, t, n, dim = image_embeds.size()
                 llm_attention_mask.append(
                     torch.cat([
                         input_atts[i][:this_input_ones],
-                        torch.ones((image_nums[i]*n), device=input_embeds.device, dtype=torch.long),
-                        torch.zeros(((t-image_nums[i])*n), device=input_embeds.device, dtype=torch.long),
+                        torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                        torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
                         input_atts[i][this_input_ones:]
                     ])
                 )
@@ -223,97 +223,7 @@ class Blip2VicunaDrive(Blip2Base):
         llm_attention_mask = torch.stack(llm_attention_mask, 0)
         return llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index
 
-    def concat_text_image_input_with_notice(self, input_embeds, input_atts, input_embeds, image_nums,
-                                            end_flag_pos_list, notice_frame_id, notice_text, image_atts=None):
-        '''
-        the function is made for processing data with [inserted] notice text
-        notice_frame_id: how many image frames before the notice
-        attention_mask:
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-        '''
-        input_part_targets_len = []
-        llm_inputs = []
-        llm_attention_mask = []
-        wp_target_index = []
-        bs = input_embeds.size()[0]
 
-        self.llm_tokenizer.padding_side = "right"
-        self.llm_tokenizer.truncation_side = 'left'
-        text_input_tokens = self.llm_tokenizer(
-            notice_text,
-            return_tensors="pt",
-            padding="longest",
-            truncation=True,
-            max_length=self.max_txt_len,
-        ).to(input_embeds.device)
-        input_notice_atts = text_input_tokens.attention_mask
-        notice_embeds = self.llm_model.get_input_embeddings()(text_input_tokens.input_ids)
-
-        for i in range(bs):
-            this_input_ones = input_atts[i].sum()
-            input_part_targets_len.append(this_input_ones)
-
-            this_notice_input_ones = input_notice_atts[i].sum()
-            if image_atts is None:
-                bs, t, n, dim = input_embeds.size()
-                if notice_frame_id[i] <= 0: # which means the scenario do not include any notice
-                    llm_inputs.append(
-                        torch.cat([
-                            input_embeds[i][:this_input_ones],
-                            input_embeds[i].view(t*n, -1),
-                            input_embeds[i][this_input_ones:],
-                            notice_embeds[i][:],
-                        ])
-                    )
-                else:
-                    llm_inputs.append(
-                        torch.cat([
-                            input_embeds[i][:this_input_ones],
-                            input_embeds[i, :notice_frame_id[i]].view(notice_frame_id[i]*n, -1),
-                            notice_embeds[i][:this_notice_input_ones],
-                            input_embeds[i, notice_frame_id[i]:].view((t-notice_frame_id[i])*n, -1),
-                            input_embeds[i][this_input_ones:],
-                            notice_embeds[i][this_notice_input_ones:],
-                        ])
-                    )
-            else:
-                pass 
-            if image_atts is None:
-                bs, t, n, dim = input_embeds.size()
-                if notice_frame_id[i] < 0: # which means the scenario do not include any notice
-                    llm_attention_mask.append(
-                        torch.cat([
-                            input_atts[i][:this_input_ones],
-                            torch.ones((image_nums[i]*n), device=input_embeds.device, dtype=torch.long),
-                            torch.zeros(((t-image_nums[i])*n), device=input_embeds.device, dtype=torch.long),
-                            torch.zeros((input_notice_atts.size(1)), device=input_embeds.device, dtype=torch.long),
-                            input_atts[i][this_input_ones:]
-                        ])
-                    )
-                else:
-                    llm_attention_mask.append(
-                        torch.cat([
-                            input_atts[i][:this_input_ones],
-                            torch.ones((image_nums[i]*n), device=input_embeds.device, dtype=torch.long),
-                            input_notice_atts[i][:this_notice_input_ones],
-                            torch.zeros(((t-image_nums[i])*n), device=input_embeds.device, dtype=torch.long),
-                            input_atts[i][this_input_ones:],
-                            input_notice_atts[i][this_notice_input_ones:],
-                        ])
-                    )
-            else:
-                pass
-            sub_target_index = []
-            for j in range(len(end_flag_pos_list[i])):
-                if j < notice_frame_id[i] or notice_frame_id[i] < 0: # when notice is '', the input_ones is 1, not ZERO
-                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones])
-                else:
-                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones + this_notice_input_ones])
-            wp_target_index.extend(sub_target_index)
-        llm_inputs = torch.stack(llm_inputs, 0)
-        llm_attention_mask = torch.stack(llm_attention_mask, 0)
-        return llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index
 
     def build_gt_waypoints(self, waypoints, valid_frames):
         gt_waypoints = []
@@ -330,8 +240,8 @@ class Blip2VicunaDrive(Blip2Base):
         gt_end_flags = torch.tensor(gt_end_flags, device=valid_frames.device).long()
         return gt_end_flags
 
-    def prompt_wrap(self, input_embeds, text_before_img, text_after_img, valid_frames):
-        bs, t, n, dim = input_embeds.size()
+    def prompt_wrap(self, image_embeds, text_before_img, text_after_img, valid_frames):
+        bs, t, n, dim = image_embeds.size()
         emb_list = []
         end_flag_pos_list = []
         for i in range(bs):
@@ -340,19 +250,19 @@ class Blip2VicunaDrive(Blip2Base):
             temp_embeds = []
             temp_end_flag_pos_list = []
             for j in range(valid_frames[i]):
-                p_before_tokens = self.llm_tokenizer(before_texts[j], return_tensors="pt", add_special_tokens=False).to(input_embeds.device)
-                p_after_tokens = self.llm_tokenizer(before_texts[j], return_tensors="pt", add_special_tokens=False).to(input_embeds.device)
+                p_before_tokens = self.llm_tokenizer(before_texts[j], return_tensors="pt", add_special_tokens=False).to(image_embeds.device)
+                p_after_tokens = self.llm_tokenizer(before_texts[j], return_tensors="pt", add_special_tokens=False).to(image_embeds.device)
                 p_before_embed = self.llm_model.get_input_embeddings()(p_before_tokens.input_ids)
                 p_after_embed = self.llm_model.get_input_embeddings()(p_after_tokens.input_ids)
-                p_embed = torch.cat([p_before_embed, input_embeds[i][j][None], p_after_embed], dim=1)
+                p_embed = torch.cat([p_before_embed, image_embeds[i][j][None], p_after_embed], dim=1)
                 temp_embeds.append(p_embed)
                 temp_end_flag_pos_list.append(p_embed.size(1)-1)
             end_flag_pos_list.append(temp_end_flag_pos_list)
             emb_list.append(torch.cat(temp_embeds, dim=1)) # 1 * m * d_dim
         emb_lens = [emb.shape[1] for emb in emb_list]
-        pad_emb = self.llm_model.get_input_embeddings()(torch.tensor(self.llm_tokenizer.pad_token_id, device=input_embeds.device))
+        pad_emb = self.llm_model.get_input_embeddings()(torch.tensor(self.llm_tokenizer.pad_token_id, device=image_embeds.device))
         wrapped_embs = pad_emb.expand(len(emb_lens), max(emb_lens), -1).clone()
-        wrapped_atts = torch.zeros([len(emb_lens), max(emb_lens)], dtype=torch.long, device=input_embeds.device)
+        wrapped_atts = torch.zeros([len(emb_lens), max(emb_lens)], dtype=torch.long, device=image_embeds.device)
         for i, emb in enumerate(emb_list):
             wrapped_embs[i, :emb_lens[i]] = emb
             wrapped_atts[i, :emb_lens[i]] = 1
@@ -371,8 +281,8 @@ class Blip2VicunaDrive(Blip2Base):
             res.append(new_samples)
         return res
 
-    def forward(self, samples, inference_mode=False, input_embeds=None):
-        if input_embeds is None: # train mode
+    def forward(self, samples, inference_mode=False, image_embeds=None):
+        if image_embeds is None: # train mode
             device = samples["rgb"].device
             bs = samples['rgb'].size(0)
             t = samples['rgb'].size(1)
@@ -384,26 +294,26 @@ class Blip2VicunaDrive(Blip2Base):
             if self.freeze_decoder_of_bev_encoder:
                 with torch.no_grad():
                     with self.maybe_autocast():
-                        input_embeds_full = []
+                        image_embeds_full = []
                         splited_samples = self.split_data(samples)
                         for i in range(self.split_section_num_for_bev_encoder):
-                            input_embeds = self.bev_encoder(splited_samples[i])
-                            input_embeds_full.append(input_embeds)
+                            image_embeds = self.bev_encoder(splited_samples[i])
+                            image_embeds_full.append(image_embeds)
                             
-                        input_embeds = torch.cat(input_embeds_full, dim=0)
+                        image_embeds = torch.cat(image_embeds_full, dim=0)
             else:
                 with self.maybe_autocast():
-                    input_embeds = self.bev_encoder(samples)
+                    image_embeds = self.bev_encoder(samples)
         else: # inference mode
-            device = input_embeds.device
-            bs = input_embeds.size(0)
-            t = input_embeds.size(1)
-            input_embeds = input_embeds.view(bs*t, *input_embeds.size()[2:])
+            device = image_embeds.device
+            bs = image_embeds.size(0)
+            t = image_embeds.size(1)
+            image_embeds = image_embeds.view(bs*t, *image_embeds.size()[2:])
 
-        input_embeds = self.ln_vision(input_embeds)
+        image_embeds = self.ln_vision(image_embeds)
         
         if self.has_qformer:
-            query_tokens = self.query_tokens.expand(input_embeds.shape[0], -1, -1)
+            query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
             text_Qformer = self.llm_tokenizer(
                 [i for i in samples['text_input'] for _ in range(t)],
                 padding='longest',
@@ -415,29 +325,29 @@ class Blip2VicunaDrive(Blip2Base):
             query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(device)
             
             Qformer_atts = torch.cat([query_atts, text_Qformer.attention_mask],dim=1)
-            image_atts = torch.ones(input_embeds.size()[:-1], dtype=torch.long).to(device)
+            image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(device)
             
             query_output = self.Qformer.bert(
                 text_Qformer.input_ids,
                 attention_mask=Qformer_atts,
                 query_embeds=query_tokens,
-                encoder_hidden_states=input_embeds,
+                encoder_hidden_states=image_embeds,
                 encoder_attention_mask=image_atts,
                 return_dict=True,
             )
 
-        input_embeds = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:])
+        image_embeds = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:])
 
-        input_embeds = input_embeds.view(bs, t, *input_embeds.size()[1:])
+        image_embeds = image_embeds.view(bs, t, *image_embeds.size()[1:])
 
         if self.use_extra_prompt:
             text_before_img = samples['text_before_img']
             text_after_img = samples['text_after_img']
-            input_embeds, image_atts, end_flag_pos_list = self.prompt_wrap(input_embeds, text_before_img, text_after_img, samples['valid_frames'])
+            image_embeds, image_atts, end_flag_pos_list = self.prompt_wrap(image_embeds, text_before_img, text_after_img, samples['valid_frames'])
         else:
             image_atts = None
             end_flag_pos_list = []
-            n_length = input_embeds.size(2)
+            n_length = image_embeds.size(2)
             for i in range(bs):
                 end_flag_pos_list.append([n_length*(j+1)-1 for j in range(samples['valid_frames'][i])])
 
@@ -455,7 +365,7 @@ class Blip2VicunaDrive(Blip2Base):
 
      
         llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index = self.concat_text_image_input(inputs_embeds, text_input_tokens.attention_mask,
-                                                                                                                   input_embeds, samples['valid_frames'], end_flag_pos_list, image_atts)
+                                                                                                                   image_embeds, samples['valid_frames'], end_flag_pos_list, image_atts)
         wp_target_index = torch.tensor(wp_target_index, device=device).long()
 
         with self.maybe_autocast():

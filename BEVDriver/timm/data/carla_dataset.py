@@ -401,7 +401,7 @@ class CarlaMVDetDataset(BaseIODataset):
                 os.path.join(route_dir, "measurements_full", "%04d.json" % frame_id)
             )
         actors_data = measurements["actors_data"]
-)
+
         '''
         # You can use tools/data/batch_merge_data.py to generate FULL measurements for reducing io cost
         measurements = self._load_json(
