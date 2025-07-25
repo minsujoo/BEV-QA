@@ -8,12 +8,12 @@ class GlobalConfig:
     turn_KP = 1.25
     turn_KI = 0.75
     turn_KD = 0.3
-    turn_n = 40  # buffer size
+    turn_n = 20  # buffer size
 
     speed_KP = 5.0
     speed_KI = 0.5
     speed_KD = 1.0
-    speed_n = 40  # buffer size
+    speed_n = 20  # buffer size
 
     max_throttle = 0.75  # upper limit on throttle signal value in dataset
     brake_speed = 0.1  # desired speed below which brake is triggered
@@ -26,7 +26,7 @@ class GlobalConfig:
     bevdriver_ckpt = 'path/to/checkpoint_best.pth' # model checkpoint
 
     agent_use_notice = False
-    sample_rate = 2
+    sample_rate = 1
 
 
     def __init__(self, **kwargs):
