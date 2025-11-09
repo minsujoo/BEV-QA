@@ -51,6 +51,7 @@ from lavis.models.clip_models.model import CLIP
 
 from lavis.models.gpt_models.gpt_dialogue import GPTDialogue
 from lavis.models.drive_models.drive import Blip2VicunaDrive
+from lavis.models.drive_models.bevqa import BEVQAModel
 
 from lavis.processors.base_processor import BaseProcessor
 
@@ -90,7 +91,8 @@ __all__ = [
     "VisionTransformerEncoder",
     "XBertLMHeadDecoder",
     "GPTDialogue",
-    "Blip2VicunaDrive"
+    "Blip2VicunaDrive",
+    "BEVQAModel",
 ]
 
 

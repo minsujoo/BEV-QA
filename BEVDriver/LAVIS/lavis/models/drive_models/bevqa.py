@@ -1,0 +1,318 @@
+import logging
+from typing import List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+from lavis.common.registry import registry
+from lavis.models.blip2_models.blip2 import disabled_train
+from lavis.models.bevllm_models.bevllm import BEVLLMBase as Blip2Base
+
+from timm import create_model
+
+
+class LayerNorm(nn.LayerNorm):
+    """Subclass torch's LayerNorm to handle fp16."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.type(torch.float32))
+        return ret.type(orig_type)
+
+
+@registry.register_model("bevqa")
+class BEVQAModel(Blip2Base):
+    """
+    BEV-QA model: Reuses BEV encoder + Q-Former to produce visual tokens
+    and conditions a causal LLM to generate VQA answers.
+
+    Inputs (samples dict expected keys):
+      - rgb, rgb_left, rgb_right, rgb_center: images (B[, T], C, H, W)
+      - lidar: point cloud/raster input as used by bevdriver_encoder
+      - measurements: driving metadata (mask, velocity, etc.)
+      - vqa_question: list[str] question texts
+      - vqa_answer: list[str] answer texts (for training)
+    """
+
+    PRETRAINED_MODEL_CONFIG_DICT = {}
+
+    def __init__(
+        self,
+        *,
+        encoder_model: str,
+        encoder_model_ckpt: str = "",
+        load_pretrained: bool = True,
+        freeze_vit: bool = True,
+        llm_model: str,
+        max_txt_len: int = 128,
+        num_query_token: int = 32,
+        has_lora: bool = True,
+    ):
+        super().__init__()
+
+        # LLM imports kept local to avoid global overhead
+        from transformers import LlamaTokenizer
+        from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
+        from lavis.models.blip2_models.modeling_opt import OPTForCausalLM
+        from transformers import AutoTokenizer
+
+        self.tokenizer = self.init_tokenizer(truncation_side="left")
+
+        # BEV encoder (timm registry: bevdriver_encoder)
+        self.bev_encoder = create_model(encoder_model)
+        logging.info(f"BEV encoder embed dim: {self.bev_encoder.embed_dim}")
+        self.ln_vision = LayerNorm(self.bev_encoder.embed_dim)
+
+        if load_pretrained and encoder_model_ckpt:
+            pretrain_weights = torch.load(encoder_model_ckpt, map_location=torch.device("cpu"))
+            # support both full and state_dict-only checkpoints
+            state = pretrain_weights.get("state_dict", pretrain_weights)
+            self.bev_encoder.load_state_dict(state, strict=False)
+
+        if freeze_vit:
+            for name, param in self.bev_encoder.named_parameters():
+                param.requires_grad = False
+            self.bev_encoder = self.bev_encoder.eval()
+            self.bev_encoder.train = disabled_train
+
+        # LLM backbone (OPT or LLaMA family)
+        self.is_opt = "opt" in llm_model.lower()
+        if self.is_opt:
+            self.llm_tokenizer = AutoTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side="left")
+            self.llm_model = OPTForCausalLM.from_pretrained(
+                llm_model, torch_dtype=torch.float16, low_cpu_mem_usage=True
+            )
+        else:
+            self.llm_tokenizer = LlamaTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side="left")
+            self.llm_model = LlamaForCausalLM.from_pretrained(
+                llm_model, torch_dtype=torch.float16, low_cpu_mem_usage=True
+            )
+
+        # Ensure special tokens exist and resize embeddings
+        self.llm_tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        # For some HF checkpoints, reuse </s> as several specials
+        self.llm_tokenizer.add_special_tokens({"bos_token": "</s>", "eos_token": "</s>", "unk_token": "</s>"})
+        self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
+
+        # Optional LoRA fine-tuning
+        self.has_lora = has_lora
+        if has_lora:
+            from peft import LoraConfig, get_peft_model
+
+            lora_cfg = LoraConfig(
+                r=16,
+                lora_alpha=32,
+                target_modules=["q_proj", "v_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            self.llm_model = get_peft_model(self.llm_model, lora_cfg)
+            self.llm_model.print_trainable_parameters()
+        else:
+            for _, p in self.llm_model.named_parameters():
+                p.requires_grad = False
+
+        # Q-Former and projection to LLM hidden size
+        self.Qformer, self.query_tokens = self.init_Qformer(num_query_token, self.bev_encoder.embed_dim)
+        # tie tokenizer for Q-Former with LLM tokenizer to keep vocab consistent
+        self.Qformer.resize_token_embeddings(len(self.llm_tokenizer))
+        self.Qformer.cls = None
+
+        self.llm_proj = nn.Linear(self.Qformer.config.hidden_size, self.llm_model.config.hidden_size)
+        self.max_txt_len = max_txt_len
+
+    def _encode_bev(self, samples: dict) -> torch.Tensor:
+        """Runs BEV encoder and returns token sequence [B, S, D].
+        Supports inputs with optional time dimension by flattening B*T.
+        """
+        rgb = samples["rgb"]
+        bt = rgb.shape[0]
+        # If inputs are shaped [B, T, ...], flatten to [B*T, ...]
+        if rgb.dim() == 5:
+            bs, t = rgb.shape[:2]
+            def _flat(x):
+                shape = x.shape
+                return x.view(bs * t, *shape[2:])
+            bev_inp = {
+                "rgb": _flat(samples["rgb"]),
+                "rgb_left": _flat(samples["rgb_left"]),
+                "rgb_right": _flat(samples["rgb_right"]),
+                "rgb_center": _flat(samples["rgb_center"]),
+                "lidar": _flat(samples["lidar"]),
+                "measurements": _flat(samples["measurements"]),
+            }
+        else:
+            bev_inp = {
+                "rgb": samples["rgb"],
+                "rgb_left": samples["rgb_left"],
+                "rgb_right": samples["rgb_right"],
+                "rgb_center": samples["rgb_center"],
+                "lidar": samples["lidar"],
+                "measurements": samples["measurements"],
+            }
+
+        with self.maybe_autocast():
+            memory = self.bev_encoder(bev_inp)  # [N, S, D]
+        return self.ln_vision(memory)
+
+    def _qformer_visual_tokens(self, bev_tokens: torch.Tensor) -> torch.Tensor:
+        """Compress BEV tokens with Q-Former and project to LLM hidden size.
+        Returns [B, Q, H].
+        """
+        atts = torch.ones(bev_tokens.size()[:-1], dtype=torch.long, device=bev_tokens.device)
+        q_tokens = self.query_tokens.expand(bev_tokens.shape[0], -1, -1)
+        q_out = self.Qformer.bert(
+            query_embeds=q_tokens,
+            encoder_hidden_states=bev_tokens,
+            encoder_attention_mask=atts,
+            use_cache=True,
+            return_dict=True,
+        )
+        vis = self.llm_proj(q_out.last_hidden_state)  # [B, Q, H]
+        return vis
+
+    def _build_prompt(self, questions: List[str]) -> List[str]:
+        # Simple instruction style prompt
+        return [f"Question: {q}\nAnswer:" for q in questions]
+
+    def forward(self, samples: dict, *, bev_memory: Optional[torch.Tensor] = None):
+        """
+        Training forward: computes LM loss on answer tokens only.
+        Expects samples to contain 'vqa_question' and 'vqa_answer' lists of strings.
+        """
+        device = samples["rgb"].device
+        questions: List[str] = samples["vqa_question"]
+        answers: List[str] = samples["vqa_answer"]
+
+        if bev_memory is None:
+            bev_tokens = self._encode_bev(samples)  # [B, S, D]
+        else:
+            bev_tokens = bev_memory
+
+        vis_tokens = self._qformer_visual_tokens(bev_tokens)  # [B, Q, H]
+
+        prompts = self._build_prompt(questions)
+
+        prompt_tokens = self.llm_tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_txt_len,
+            return_tensors="pt",
+        ).to(device)
+
+        answer_tokens = self.llm_tokenizer(
+            answers,
+            padding=True,
+            truncation=True,
+            max_length=self.max_txt_len,
+            return_tensors="pt",
+        ).to(device)
+
+        # Build inputs_embeds = [prompt_embeds, vis_tokens, answer_embeds]
+        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids)
+        answer_embeds = self.llm_model.get_input_embeddings()(answer_tokens.input_ids)
+
+        inputs_embeds = torch.cat([prompt_embeds, vis_tokens, answer_embeds], dim=1)
+
+        attn_prompt = prompt_tokens.attention_mask
+        attn_vis = torch.ones(vis_tokens.size()[:2], dtype=torch.long, device=device)
+        attn_ans = answer_tokens.attention_mask
+        attention_mask = torch.cat([attn_prompt, attn_vis, attn_ans], dim=1)
+
+        # Labels: ignore prompt + visual tokens; supervise only on answer tokens
+        ignore = torch.full(attn_prompt.size(), -100, dtype=torch.long, device=device)
+        ignore_vis = torch.full(attn_vis.size(), -100, dtype=torch.long, device=device)
+        labels = torch.cat([ignore, ignore_vis, answer_tokens.input_ids], dim=1)
+
+        out = self.llm_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True,
+        )
+        return {"loss": out.loss, "lm_loss": out.loss}
+
+    @torch.no_grad()
+    def generate(
+        self,
+        samples: dict,
+        *,
+        bev_memory: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 32,
+        num_beams: int = 1,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+    ) -> List[str]:
+        device = samples["rgb"].device
+        questions: List[str] = samples["vqa_question"]
+
+        if bev_memory is None:
+            bev_tokens = self._encode_bev(samples)
+        else:
+            bev_tokens = bev_memory
+
+        vis_tokens = self._qformer_visual_tokens(bev_tokens)  # [B, Q, H]
+
+        prompts = self._build_prompt(questions)
+        prompt_tokens = self.llm_tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_txt_len,
+            return_tensors="pt",
+        ).to(device)
+        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids)
+        inputs_embeds = torch.cat([prompt_embeds, vis_tokens], dim=1)
+        attention_mask = torch.cat(
+            [prompt_tokens.attention_mask, torch.ones(vis_tokens.size()[:2], dtype=torch.long, device=device)],
+            dim=1,
+        )
+
+        gen_ids = self.llm_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            do_sample=(num_beams == 1),
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=self.llm_tokenizer.eos_token_id,
+            pad_token_id=self.llm_tokenizer.pad_token_id,
+        )
+        # We only want the generated continuation after the prompt length; decode full and postprocess
+        texts = self.llm_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        # Strip the leading prompt part if present
+        cleaned = []
+        for p, t in zip(prompts, texts):
+            idx = t.lower().find("answer:")
+            if idx >= 0:
+                ans = t[idx + len("answer:") :].strip()
+            else:
+                ans = t.strip()
+            cleaned.append(ans)
+        return cleaned
+
+    @classmethod
+    def from_config(cls, cfg):
+        encoder_model = cfg.get("encoder_model")
+        encoder_model_ckpt = cfg.get("encoder_model_ckpt", "")
+        load_pretrained = cfg.get("load_pretrained", True)
+        freeze_vit = cfg.get("freeze_vit", True)
+        llm_model = cfg.get("llm_model")
+        max_txt_len = cfg.get("max_txt_len", 64)
+        num_query_token = cfg.get("num_query_token", 32)
+        has_lora = cfg.get("has_lora", True)
+
+        return cls(
+            encoder_model=encoder_model,
+            encoder_model_ckpt=encoder_model_ckpt,
+            load_pretrained=load_pretrained,
+            freeze_vit=freeze_vit,
+            llm_model=llm_model,
+            max_txt_len=max_txt_len,
+            num_query_token=num_query_token,
+            has_lora=has_lora,
+        )
+
