@@ -9,7 +9,7 @@ Key capabilities
 
 Project status
 - Implemented: model and registry wiring (`lavis/models/drive_models/bevqa.py`), docs.
-- Pending: SimLingo dataset loader, training config, SPICE evaluation wrapper. See `docs/BEV-QA.md`.
+- Pending: Bench2Drive + Chat-B2D dataset loader, training config, SPICE evaluation wrapper. See `docs/BEV-QA.md`.
 
 Repository structure (selected)
 - `BEVDriver/LAVIS/lavis/models/drive_models/bevqa.py`: BEV‑QA model.
@@ -49,9 +49,25 @@ samples = {
 answers = model.generate(samples, max_new_tokens=16)
 ```
 
-Training (coming soon)
-- Dataset: SimLingo VQA (RGB/LiDAR/questions/answers). A dataset loader and `lavis/projects/bevqa/train.yaml` will be added.
-- Loss: token‑level cross‑entropy on answer text (teacher‑forcing). See `docs/BEV-QA.md`.
+Training
+- Dataset: Bench2Drive_Base (RGB/LiDAR) + Chat‑B2D (multi‑turn driving QA). See `docs/BEV-QA.md` for the expected folder layout.
+- Loss: token‑level cross‑entropy on answer text (teacher‑forcing).
+- Execution (single GPU example):
+  ```bash
+  conda activate bevdriver
+  cd BEVDriver/LAVIS
+  python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 \
+    train.py --cfg-path lavis/projects/bevqa/train.yaml
+  ```
+  For multi-GPU training, increase `--nproc_per_node` (e.g., 4) and optionally set `run.world_size` in the config.
+
+Validation / SPICE-style evaluation
+- Validation automatically runs `model.generate()` and stores `{id, pred, ref}` JSON under `BEVDriver/LAVIS/out/bevqa/<job_id>/`.
+- Run the pseudo-SPICE wrapper on that file:
+  ```bash
+  python BEVDriver/tools/eval/spice_eval.py \
+    --file BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch0.json
+  ```
 
 Evaluation (coming soon)
 - VQA text metrics with SPICE. A wrapper will be provided under `BEVDriver/tools/eval/spice_eval.py`.

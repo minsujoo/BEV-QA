@@ -34,7 +34,9 @@ class BEVQAModel(Blip2Base):
       - vqa_answer: list[str] answer texts (for training)
     """
 
-    PRETRAINED_MODEL_CONFIG_DICT = {}
+    PRETRAINED_MODEL_CONFIG_DICT = {
+        "base": "configs/models/bevqa.yaml",
+    }
 
     def __init__(
         self,
@@ -315,4 +317,3 @@ class BEVQAModel(Blip2Base):
             num_query_token=num_query_token,
             has_lora=has_lora,
         )
-

@@ -5,7 +5,7 @@
 ## 목표 요약
 - 기존: BEV 특징 → Waypoint 예측(L1/MSE)
 - 변경: BEV 특징 + 질문 → VQA 답변 텍스트 생성(언어모델링 CE)
-- 데이터: SimLingo RGB, LiDAR, VQA(drivelm)
+- 데이터: Bench2Drive 센서(BEVDriver용 RGB/LiDAR) + Chat-B2D 대화형 언어 데이터
 
 ## 디렉터리 및 신규 모듈
 - 재사용
@@ -15,7 +15,7 @@
   - Waypoint 헤드(예: GRU/MLP/WaypointAdapter) 및 관련 손실/로직
 - 신규(제안 경로)
   - 모델: `BEVDriver/LAVIS/lavis/models/drive_models/bevqa.py`
-  - 데이터셋: `BEVDriver/LAVIS/lavis/datasets/datasets/simlingo_vqa.py`
+  - 데이터셋: `BEVDriver/LAVIS/lavis/datasets/datasets/bench2drive_chatb2d_vqa.py`
   - 설정: `BEVDriver/LAVIS/lavis/projects/bevqa/train.yaml`
   - 평가(SPICE 래퍼): `BEVDriver/tools/eval/spice_eval.py`
 
@@ -27,7 +27,7 @@
   - 입력 키: `rgb`, `rgb_left`, `rgb_right`, `rgb_center`, `lidar`, `measurements`, `vqa_question`(list[str]), `vqa_answer`(list[str])
   - 출력: 학습 `{"loss": lm_loss}`, 평가 `List[str]` 답변
 - 미구현(다음 단계)
-  - SimLingo VQA 데이터셋 로더/빌더, collate
+  - Bench2Drive + Chat-B2D VQA 데이터셋 로더/빌더, collate
   - 프로젝트 설정 파일 `lavis/projects/bevqa/train.yaml`
   - SPICE 평가 래퍼 `tools/eval/spice_eval.py`
 
@@ -68,16 +68,20 @@ loss, out = model(rgb, lidar, question_text, answer_text)
 answers = model.generate(rgb, lidar, question_text, max_len=32, top_p=0.9)
 ```
 
-## 데이터 로딩(SimLingo)
-- 신규 Dataset: `simlingo_vqa.py`
+## 데이터 로딩(Bench2Drive + Chat-B2D)
+- 신규 Dataset: `bench2drive_chatb2d_vqa.py`
+  - 센서 루트 예시: `/home/p112g22/minsu/Bench2Drive_Base`
+  - 언어 루트 예시: `/home/p112g22/minsu/Chat-B2D/chat-B2D/{train,val}`
 - `__getitem__` 반환 값
-  - `rgb_images`: 멀티뷰 텐서/리스트
-  - `lidar_points`: 포인트클라우드 또는 BEV 변환 입력
-  - `vqa_question`: 문자열
-  - `vqa_answer`: 문자열(학습용 라벨)
+  - `id`: `<scenario>/<frame>` 문자열 (검증 결과 JSON 저장 시 사용)
+  - `rgb`, `rgb_left`, `rgb_right`, `rgb_center`: front/front_left/front_right 카메라를 TIMM transform으로 처리한 멀티뷰 텐서
+  - `lidar`: `lidar/<frame>.laz`를 `laspy`로 읽고 `lidar_to_histogram_features`(3×H×W)로 실시간 변환한 BEV 텐서
+  - `measurements`: 길이 7 벡터 = 6‑way command one-hot + speed(실수). `anno/<frame>.json.gz`에서 `next_command`, `speed`를 읽어 구성
+  - `vqa_question`: Chat-B2D QA 중 한 개 질문
+  - `vqa_answer`: 해당 질문의 정답 텍스트
 - Collate
-  - 이미지/라이다 배치 스택, 텍스트는 토크나이즈
-  - `labels`: `[BOS] 정답 ... [EOS]`를 1‑토큰 시프트, pad는 `ignore_index`
+  - 이미지/라이다/measurements는 배치 단위로 스택, 텍스트는 list[str]
+  - 토크나이즈 및 `[BOS] 정답 ... [EOS]` 시프트는 `BEVQAModel.forward` 내부에서 처리
 
 ## 학습 및 설정
 - 손실: CE(언어모델링). 옵티마/스케줄러는 기존(AdamW, cosine 등) 재사용 가능
@@ -89,27 +93,28 @@ python -m torch.distributed.run \
   --nproc_per_node=1 --master_port=12345 \
   train.py --cfg-path lavis/projects/bevqa/train.yaml
 ```
+- Multi-GPU: `--nproc_per_node=<GPU수>` 로 확장 가능 (`run.world_size`도 원하는 값으로 조정)
 - `train.yaml` 핵심 항목(예)
-  - `datasets: simlingo_vqa`
-  - `model: bevqa`(인코더 경로, LLM 토크나이저, max_txt_len, freeze 백본 여부)
-  - `optimization: batch_size, lr, epochs`
+  - `datasets: bench2drive_chatb2d` (sensor/language root 경로 설정)
+  - `model: bevqa` (인코더 ckpt, LLM 경로, LoRA 여부 등 세부 config)
+  - `run.task: bevqa_drive` (검증 단계에서 generate + JSON 저장)
 
 ## 평가(SPICE)
 1) 검증 단계 수집
-- `validation_step`: `generated_answer`와 `vqa_answer`를 함께 저장
-- `on_validation_epoch_end`: `{id, pred, ref}` JSON 생성
+- `bevqa_drive` task가 자동으로 `model.generate()`를 호출하고 `{id, pred, ref}` 리스트를
+  `BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch{epoch}.json` 로 저장
 
-2) SPICE 실행(래퍼)
+2) SPICE 스타일 점수 계산
 ```bash
 python BEVDriver/tools/eval/spice_eval.py \
-  --pred outputs/val_preds.json --ref outputs/val_refs.json
+  --file BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch0.json
 ```
-- SPICE 외부 라이브러리/스크립트를 래퍼에서 호출하도록 구성(벤더링 권장)
+- 현재는 토큰 단위 F1 기반 pseudo-SPICE (필요 시 실제 SPICE 스크립트로 교체 가능)
 
 ## 구현 체크리스트
-- [ ] Waypoint 헤드/로스 제거 및 `forward` 정리
-- [ ] SimLingo Dataset/Collate/토크나이저 구현
-- [ ] LLM `generate()` 경로 및 CE 손실 적용
+- [x] Waypoint 헤드/로스 제거 및 `forward` 정리
+- [ ] Bench2Drive + Chat-B2D Dataset/Collate/토크나이저 구현
+- [x] LLM `generate()` 경로 및 CE 손실 적용
 - [ ] SPICE 평가 래퍼 연동 및 메트릭 로깅
 - [ ] `train.yaml` 하이퍼파라미터/경로 정리
 

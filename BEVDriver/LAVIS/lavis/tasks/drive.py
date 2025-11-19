@@ -5,6 +5,7 @@
  For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 """
 
+import json
 import logging
 import os
 
@@ -126,6 +127,132 @@ class DriveTask(BaseTask):
             dist.barrier()
 
         return results
+
+
+@registry.register_task("bevqa_drive")
+class BEVQADriveTask(DriveTask):
+    """
+    DriveTask variant for BEV-QA that, in addition to loss, runs model.generate()
+    on validation samples and dumps {id, pred, ref} JSON for external metrics
+    (e.g., SPICE wrapper).
+    """
+
+    def __init__(
+        self,
+        num_beams: int = 1,
+        max_new_tokens: int = 32,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_beams = num_beams
+        self.max_new_tokens = max_new_tokens
+        self.top_p = top_p
+        self.repetition_penalty = repetition_penalty
+
+    @classmethod
+    def setup_task(cls, cfg):
+        run_cfg = cfg.run_cfg
+        return cls(
+            num_beams=run_cfg.get("num_beams", 1),
+            max_new_tokens=run_cfg.get("max_new_tokens", 32),
+            top_p=run_cfg.get("top_p", 0.9),
+            repetition_penalty=run_cfg.get("repetition_penalty", 1.0),
+        )
+
+    def valid_step(self, model, samples):
+        # Compute loss
+        output = model(samples)
+
+        # Generate answers for evaluation
+        preds = model.generate(
+            samples,
+            max_new_tokens=self.max_new_tokens,
+            num_beams=self.num_beams,
+            top_p=self.top_p,
+            repetition_penalty=self.repetition_penalty,
+        )
+
+        refs = samples["vqa_answer"]
+        ids = samples.get("id", None)
+
+        # ids may be a list of strings or tensors; keep as-is, normalize later.
+        return {
+            "loss": output["loss"],
+            "pred": preds,
+            "ref": refs,
+            "id": ids,
+        }
+
+    def after_evaluation(self, val_result, epoch, split_name=None, writer=None, **kwargs):
+        # Aggregate numeric metrics (e.g., loss) while preserving predictions.
+        metrics = {}
+        nums = 0
+
+        for each in val_result:
+            nums += 1
+            for key, value in each.items():
+                if key in ("pred", "ref", "id"):
+                    continue
+                if key not in metrics:
+                    metrics[key] = 0.0
+                if isinstance(value, (float, int)):
+                    metrics[key] += float(value)
+                else:
+                    metrics[key] += float(value.detach().cpu().item())
+
+        if nums > 0:
+            for key in metrics:
+                metrics[key] /= nums
+
+        out_str = ""
+        for key in metrics:
+            out_str += "%s: %.3f, " % (key, metrics[key])
+            if writer is not None and is_main_process():
+                writer.add_scalar("val/%s_epoch" % key, metrics[key], epoch)
+
+        if out_str:
+            logging.info("Eval Epoch %d, %s", epoch, out_str)
+
+        if "loss" in metrics:
+            metrics["agg_metrics"] = metrics["loss"]
+
+        # Collect predictions and references into a flat list.
+        if is_main_process():
+            records = []
+            for batch_out in val_result:
+                batch_ids = batch_out.get("id", [])
+                batch_preds = batch_out.get("pred", [])
+                batch_refs = batch_out.get("ref", [])
+
+                # Normalize ids to Python strings.
+                if isinstance(batch_ids, torch.Tensor):
+                    batch_ids = batch_ids.cpu().tolist()
+
+                for sid, pred, ref in zip(batch_ids, batch_preds, batch_refs):
+                    if isinstance(sid, torch.Tensor):
+                        sid = sid.item()
+                    sid = str(sid)
+                    records.append(
+                        {
+                            "id": sid,
+                            "pred": pred,
+                            "ref": ref,
+                        }
+                    )
+
+            out_dir = registry.get_path("output_dir")
+            os.makedirs(out_dir, exist_ok=True)
+            prefix = split_name if split_name is not None else "val"
+            out_path = os.path.join(out_dir, f"{prefix}_bevqa_epoch{epoch}.json")
+
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+
+            logging.info("Saved BEV-QA predictions to %s", out_path)
+
+        return metrics
 
     def train_epoch(
         self,

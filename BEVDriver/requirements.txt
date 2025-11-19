@@ -7,5 +7,5 @@ torchvision
 pyyaml
 scikit-image
 opencv-python
-torch_scatter
 tqdm
+laspy

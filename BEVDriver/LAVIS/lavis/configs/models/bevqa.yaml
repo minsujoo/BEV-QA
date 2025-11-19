@@ -1,0 +1,15 @@
+model:
+  arch: bevqa
+  model_type: base
+
+  # These are safe defaults and should be overridden in project configs.
+  encoder_model: bevdriver_encoder
+  encoder_model_ckpt: "/workspace/BEV-QA/weights/bevdriver/checkpoint_best.pth"
+  load_pretrained: True
+  freeze_vit: True
+  llm_model: "/workspace/BEV-QA/weights/llama-7b"
+  max_txt_len: 64
+  num_query_token: 32
+  has_lora: True
+
+preprocess: null

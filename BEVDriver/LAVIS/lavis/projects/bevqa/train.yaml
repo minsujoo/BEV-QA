@@ -1,0 +1,61 @@
+ # BEV-QA training config on Bench2Drive_Base + Chat-B2D.
+
+model:
+  arch: bevqa
+  model_type: base
+  encoder_model: bevdriver_encoder
+  encoder_model_ckpt: /workspace/BEV-QA/weights/bevdriver/checkpoint_best.pth
+  llm_model: /workspace/BEV-QA/weights/llama-7b
+  load_pretrained: True
+  freeze_vit: True
+  max_txt_len: 64
+  num_query_token: 32
+  has_lora: True
+
+datasets:
+  bench2drive_chatb2d: # name of the dataset builder
+    build_info:
+      annotations:
+        train:
+          sensor_root: '/home/p112g22/minsu/Bench2Drive_Base'
+          language_root: '/home/p112g22/minsu/Chat-B2D/chat-B2D/train'
+          input_rgb_size: 224
+          input_multi_view_size: 112
+          input_lidar_size: 224
+        val:
+          sensor_root: '/home/p112g22/minsu/Bench2Drive_Base'
+          language_root: '/home/p112g22/minsu/Chat-B2D/chat-B2D/val'
+          input_rgb_size: 224
+          input_multi_view_size: 112
+          input_lidar_size: 224
+
+run:
+  task: bevqa_drive
+
+  lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 1e-4
+  min_lr: 1e-5
+  warmup_lr: 1e-6
+
+  weight_decay: 0.06
+  max_epoch: 15
+  batch_size_train: 4
+  batch_size_eval: 4
+  num_workers: 4
+  num_nodes: 1
+  warmup_steps: 2000
+
+  seed: 42
+  output_dir: "out/bevqa"
+
+  amp: True
+  resume_ckpt_path: null
+
+  evaluate: False
+  train_splits: ["train"]
+  valid_splits: ["val"]
+
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: True

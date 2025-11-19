@@ -39,6 +39,7 @@ from lavis.datasets.builders.retrieval_builder import (
 from lavis.datasets.builders.dialogue_builder import AVSDDialBuilder
 from lavis.datasets.builders.text_to_image_generation_builder import BlipDiffusionFinetuneBuilder
 from lavis.datasets.builders.carla_dataset_builder import CarlaDatasetBuilder
+from lavis.datasets.builders.bench2drive_chatb2d_builder import Bench2DriveChatB2DBuilder
 
 from lavis.common.registry import registry
 
@@ -66,7 +67,8 @@ __all__ = [
     "VGCaptionBuilder",
     "VGVQABuilder",
     "AVSDDialBuilder",
-    "CarlaDatasetBuilder"
+    "CarlaDatasetBuilder",
+    "Bench2DriveChatB2DBuilder",
 ]
 
 

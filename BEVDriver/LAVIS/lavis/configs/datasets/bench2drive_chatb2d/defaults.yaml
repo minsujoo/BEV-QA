@@ -1,0 +1,20 @@
+ # Bench2Drive_Base + Chat-B2D VQA default dataset config.
+ # Paths here are placeholders; override in project configs as needed.
+
+datasets:
+  bench2drive_chatb2d: # name of the dataset builder
+    build_info:
+      annotations:
+        train:
+          sensor_root: '/path/to/Bench2Drive_Base'              # e.g. /home/p112g22/minsu/Bench2Drive_Base
+          language_root: '/path/to/Chat-B2D/chat-B2D/train'     # e.g. /home/p112g22/minsu/Chat-B2D/chat-B2D/train
+          input_rgb_size: 224
+          input_multi_view_size: 112
+          input_lidar_size: 224
+        val:
+          sensor_root: '/path/to/Bench2Drive_Base'
+          language_root: '/path/to/Chat-B2D/chat-B2D/val'
+          input_rgb_size: 224
+          input_multi_view_size: 112
+          input_lidar_size: 224
+
