@@ -1,11 +1,23 @@
 import math
 import json
 import os
+import logging
 
 from tqdm import tqdm
 from PIL import Image
-import cv2
 import numpy as np
+
+# Local change (BEV-QA): make OpenCV optional so that a broken cv2 install
+# does not prevent BEV-QA training, which does not use these heatmap utilities.
+try:
+    import cv2  # type: ignore
+except Exception as exc:  # pragma: no cover - defensive import
+    cv2 = None
+    logging.getLogger(__name__).warning(
+        "OpenCV import failed in heatmap_utils (%s); "
+        "heatmap-based visualizations will be disabled.",
+        exc,
+    )
 
 
 # VALUES = [255, 150, 120, 90, 60, 30][::-1]
@@ -17,6 +29,8 @@ EXTENT = [0]
 
 
 def add_rect(img, loc, ori, box, value, pixels_per_meter, max_distance, color):
+    if cv2 is None:
+        raise RuntimeError("cv2 is not available; add_rect cannot be used.")
     img_size = max_distance * pixels_per_meter * 2
     vet_ori = np.array([-ori[1], ori[0]])
     hor_offset = box[0] * ori
@@ -65,6 +79,8 @@ def generate_future_waypoints(measurements, pixels_per_meter=5, max_distance=18)
         new_loc = new_loc * pixels_per_meter + pixels_per_meter * max_distance
         new_loc = np.around(new_loc)
         new_loc = tuple(new_loc.astype(int))
+        if cv2 is None:
+            raise RuntimeError("cv2 is not available; generate_future_waypoints cannot be used.")
         img = cv2.circle(img, new_loc, 3, 255, -1)
     img = np.clip(img, 0, 255)
     img = img.astype(np.uint8)
@@ -72,6 +88,8 @@ def generate_future_waypoints(measurements, pixels_per_meter=5, max_distance=18)
 
 
 def generate_heatmap(measurements, actors_data, pixels_per_meter=5, max_distance=18):
+    if cv2 is None:
+        raise RuntimeError("cv2 is not available; generate_heatmap cannot be used.")
     img_size = max_distance * pixels_per_meter * 2
     img = np.zeros((img_size, img_size, 3), int)
     ego_x = measurements["x"]

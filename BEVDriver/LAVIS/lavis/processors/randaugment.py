@@ -5,7 +5,17 @@
  For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 """
 
-import cv2
+import logging
+
+try:
+    import cv2  # type: ignore
+except Exception as exc:  # pragma: no cover - defensive import
+    cv2 = None
+    logging.getLogger(__name__).warning(
+        "cv2 import failed in randaugment (%s); RandAugment transforms will be disabled.",
+        exc,
+    )
+
 import numpy as np
 
 import torch
@@ -340,6 +350,8 @@ class RandomAugment(object):
     def __call__(self, img):
         if self.isPIL:
             img = np.array(img)
+        if cv2 is None:
+            return img
         ops = self.get_random_ops()
         for name, prob, level in ops:
             if np.random.random() > prob:
@@ -365,6 +377,8 @@ class VideoRandomAugment(object):
         return [(op, self.M) for op in sampled_ops]
 
     def __call__(self, frames):
+        if cv2 is None:
+            return frames.clone() if self.tensor_in_tensor_out else frames
         assert (
             frames.shape[-1] == 3
         ), "Expecting last dimension for 3-channels RGB (b, h, w, c)."

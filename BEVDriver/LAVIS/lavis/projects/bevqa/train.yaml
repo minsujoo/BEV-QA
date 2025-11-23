@@ -28,6 +28,21 @@ datasets:
           input_rgb_size: 224
           input_multi_view_size: 112
           input_lidar_size: 224
+        # Optional held-out test set (fill in actual paths before use).
+        # When populated, enable via run.test_splits: ["test"] or
+        # --options run.test_splits=[\"test\"] on the CLI.
+        test:
+          sensor_root: '/path/to/Bench2Drive_Base_test'
+          language_root: '/path/to/Chat-B2D/chat-B2D/test'
+          input_rgb_size: 224
+          input_multi_view_size: 112
+          input_lidar_size: 224
+
+    # Optional: split the provided val set into val_dev / val_test
+    # (ratios/size are applied after shuffling with the seed below).
+    val_split:
+      dev_ratio: 0.5  # or set dev_size: N to use an absolute count
+      seed: 42
 
 run:
   task: bevqa_drive
@@ -38,12 +53,21 @@ run:
   warmup_lr: 1e-6
 
   weight_decay: 0.06
-  max_epoch: 15
+  max_epoch: 100
   batch_size_train: 4
   batch_size_eval: 4
   num_workers: 4
   num_nodes: 1
   warmup_steps: 2000
+  # Early stopping based on validation agg_metrics (loss for BEV-QA).
+  # Set patience <= 0 to disable.
+  early_stop_patience: 2
+  early_stop_min_delta: 0.0
+
+  # Debug options: limit steps per epoch for quick smoke tests.
+  # Set to null or omit when running full training.
+  debug_max_train_iters: null
+  debug_max_val_iters: null
 
   seed: 42
   output_dir: "out/bevqa"
@@ -52,10 +76,14 @@ run:
   resume_ckpt_path: null
 
   evaluate: False
+  skip_generate: True
   train_splits: ["train"]
-  valid_splits: ["val"]
+  # Use the derived dev split for validation; test_splits can use val_test or a real test set.
+  valid_splits: ["val_dev"]
+  test_splits: ["val_test"]
 
   device: "cuda"
   world_size: 1
   dist_url: "env://"
   distributed: True
+  find_unused_parameters: True

@@ -27,6 +27,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
 from transformers.utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -429,7 +430,7 @@ OPT_START_DOCSTRING = r"""
     "The bare OPT Model outputting raw hidden-states without any specific head on top.",
     OPT_START_DOCSTRING,
 )
-class OPTPreTrainedModel(PreTrainedModel):
+class OPTPreTrainedModel(PreTrainedModel, GenerationMixin):
 
     config_class = OPTConfig
     base_model_prefix = "model"

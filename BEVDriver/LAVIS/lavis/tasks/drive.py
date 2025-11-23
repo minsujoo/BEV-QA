@@ -114,6 +114,32 @@ class DriveTask(BaseTask):
         # TODO make it configurable
         print_freq = 10
 
+        # Optional: limit number of validation iterations for quick debugging.
+        cfg = registry.get("configuration", default=None, no_warning=True)
+        if cfg is not None:
+            max_val_iters = cfg.run_cfg.get("debug_max_val_iters", None)
+            if max_val_iters is not None:
+
+                class _LimitedLoader:
+                    def __init__(self, loader, max_iters):
+                        self.loader = loader
+                        self.max_iters = int(max_iters)
+
+                    def __iter__(self):
+                        for i, batch in enumerate(self.loader):
+                            if i >= self.max_iters:
+                                break
+                            yield batch
+
+                    def __len__(self):
+                        try:
+                            base_len = len(self.loader)
+                        except TypeError:
+                            base_len = self.max_iters
+                        return min(base_len, self.max_iters)
+
+                data_loader = _LimitedLoader(data_loader, max_val_iters)
+
         results = []
 
         for samples in metric_logger.log_every(data_loader, print_freq, header):
@@ -143,6 +169,7 @@ class BEVQADriveTask(DriveTask):
         max_new_tokens: int = 32,
         top_p: float = 0.9,
         repetition_penalty: float = 1.0,
+        skip_generate: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -150,6 +177,7 @@ class BEVQADriveTask(DriveTask):
         self.max_new_tokens = max_new_tokens
         self.top_p = top_p
         self.repetition_penalty = repetition_penalty
+        self.skip_generate = skip_generate
 
     @classmethod
     def setup_task(cls, cfg):
@@ -159,13 +187,17 @@ class BEVQADriveTask(DriveTask):
             max_new_tokens=run_cfg.get("max_new_tokens", 32),
             top_p=run_cfg.get("top_p", 0.9),
             repetition_penalty=run_cfg.get("repetition_penalty", 1.0),
+            skip_generate=run_cfg.get("skip_generate", False),
         )
 
     def valid_step(self, model, samples):
         # Compute loss
         output = model(samples)
 
-        # Generate answers for evaluation
+        # Optionally skip generation (for unstable HF/PEFT combos or faster val).
+        if self.skip_generate:
+            return {"loss": output["loss"]}
+
         preds = model.generate(
             samples,
             max_new_tokens=self.max_new_tokens,
@@ -332,6 +364,13 @@ class BEVQADriveTask(DriveTask):
         """
         use_amp = scaler is not None
 
+        # Optional: limit number of training iterations per epoch for quick debugging.
+        cfg = registry.get("configuration", default=None, no_warning=True)
+        if cfg is not None:
+            max_train_iters = cfg.run_cfg.get("debug_max_train_iters", None)
+            if max_train_iters is not None:
+                iters_per_epoch = min(iters_per_epoch, int(max_train_iters))
+
         if not hasattr(data_loader, "__next__"):
             # convert to iterator if not already
             data_loader = iter(data_loader)
@@ -377,12 +416,15 @@ class BEVQADriveTask(DriveTask):
                 loss, loss_dict = self.train_step(model=model, samples=samples)
                 loss /= accum_grad_iters #TODO: not affect loss_dict values for logging
 
-            if is_main_process():
+            if is_main_process() and writer is not None:
                 for key in loss_dict:
-                    if isinstance(loss_dict[key], float) or isinstance(loss_dict[key], int):
-                        writer.add_scalar('train/%s_iter' % key, loss_dict[key], epoch*iters_per_epoch+i)
-                    else:
-                        writer.add_scalar('train/%s_iter' % key, loss_dict[key].item(), epoch*iters_per_epoch+i)
+                    value = loss_dict[key]
+                    if isinstance(value, (float, int)):
+                        writer.add_scalar('train/%s_iter' % key, value, epoch*iters_per_epoch+i)
+                    elif torch.is_tensor(value):
+                        if value.numel() == 1:
+                            writer.add_scalar('train/%s_iter' % key, value.item(), epoch*iters_per_epoch+i)
+                    # skip non-scalar tensors
 
             # after_train_step()
             if use_amp:

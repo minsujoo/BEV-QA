@@ -89,9 +89,11 @@ class RunnerBase:
             # distributed training wrapper
             if self.use_distributed:
                 if self._wrapped_model is None:
+                    find_unused = self.config.run_cfg.get("find_unused_parameters", False)
                     self._wrapped_model = DDP(
-                        self._model, device_ids=[self.config.run_cfg.gpu],
-                        find_unused_parameters=False
+                        self._model,
+                        device_ids=[self.config.run_cfg.gpu],
+                        find_unused_parameters=find_unused,
                     )
             else:
                 self._wrapped_model = self._model
@@ -358,6 +360,11 @@ class RunnerBase:
         start_time = time.time()
         best_agg_metric = float('inf')
         best_epoch = 0
+        # early stopping states
+        early_stop_patience = int(self.config.run_cfg.get("early_stop_patience", 0))
+        early_stop_min_delta = float(self.config.run_cfg.get("early_stop_min_delta", 0.0))
+        epochs_no_improve = 0
+        stop_training = False
 
         self.log_config()
 
@@ -386,27 +393,55 @@ class RunnerBase:
                     val_log = self.eval_epoch(
                         split_name=split_name, cur_epoch=cur_epoch, writer=self.writer
                     )
-                    if val_log is not None:
-                        if is_main_process():
-                            assert (
-                                "agg_metrics" in val_log
-                            ), "No agg_metrics found in validation log."
+                    if val_log is not None and is_main_process():
+                        assert (
+                            "agg_metrics" in val_log
+                        ), "No agg_metrics found in validation log."
 
-                            agg_metrics = val_log["agg_metrics"]
-                            if agg_metrics < best_agg_metric and split_name == "val":
-                                best_epoch, best_agg_metric = cur_epoch, agg_metrics
+                        agg_metrics = float(val_log["agg_metrics"])
+                        improved = agg_metrics < (best_agg_metric - early_stop_min_delta)
 
-                                self._save_checkpoint(cur_epoch, is_best=True)
+                        if improved and split_name == "val":
+                            best_epoch, best_agg_metric = cur_epoch, agg_metrics
+                            epochs_no_improve = 0
+                            self._save_checkpoint(cur_epoch, is_best=True)
+                        elif split_name == "val":
+                            epochs_no_improve += 1
 
-                            val_log.update({"best_epoch": best_epoch})
-                            self.log_stats(val_log, split_name)
+                        # log stats (including best_epoch)
+                        val_log.update({"best_epoch": best_epoch})
+                        self.log_stats(val_log, split_name)
+
+                        # check early stopping condition on main process
+                        if (
+                            early_stop_patience > 0
+                            and epochs_no_improve >= early_stop_patience
+                        ):
+                            logging.info(
+                                "Early stopping triggered at epoch %d (no "
+                                "improvement in %d epochs; best agg_metrics=%.6f at epoch %d).",
+                                cur_epoch,
+                                epochs_no_improve,
+                                best_agg_metric,
+                                best_epoch,
+                            )
+                            stop_training = True
 
             else:
                 # if no validation split is provided, we just save the checkpoint at the end of each epoch.
                 if not self.evaluate_only:
                     self._save_checkpoint(cur_epoch, is_best=False)
 
-            if self.evaluate_only:
+            # synchronize early-stop signal across ranks
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                stop_tensor = torch.tensor(
+                    1 if stop_training else 0,
+                    device=self.device if self.cuda_enabled else "cpu",
+                )
+                torch.distributed.broadcast(stop_tensor, src=0)
+                stop_training = bool(stop_tensor.item())
+
+            if self.evaluate_only or stop_training:
                 break
 
             dist.barrier()
@@ -462,12 +497,11 @@ class RunnerBase:
         data_loader = self.dataloaders.get(split_name, None)
         assert data_loader, "data_loader for split {} is None.".format(split_name)
 
-        # TODO In validation, you need to compute loss as well as metrics
-        # TODO consider moving to model.before_evaluation()
-        #model = self.unwrap_dist_model(self.model)
-        #if not skip_reload and cur_epoch == "best":
-        #  model = self._reload_best_model(model)
-        model = self.model
+        # Use the underlying model (not DDP wrapper) during evaluation so that
+        # task code can access custom methods like `generate` or `predict_answers`.
+        model = self.unwrap_dist_model(self.model)
+        if not skip_reload and cur_epoch == "best":
+            model = self._reload_best_model(model)
         model.eval()
 
         #self.task.before_evaluation(

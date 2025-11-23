@@ -20,9 +20,9 @@ class GlobalConfig:
     brake_ratio = 1.1  # ratio of speed to desired speed at which brake is triggered
     clip_delta = 0.35  # maximum change in speed input to logitudinal controller
 
-    llm_model = '/path/to/LLMs/llama-7b' # path of base-LLM
+    llm_model = '/workspace/BEV-QA/weights/llama-7b' # path of base-LLM
     encoder_model = 'bevdriver_encoder' # architecture of the encoder model
-    encoder_model_ckpt = '/path/to/last.pth.tar' # encoder model checkpoint
+    encoder_model_ckpt = '/workspace/BEV-QA/weights/bevdriver/checkpoint_best.pth' # encoder model checkpoint
     bevdriver_ckpt = 'path/to/checkpoint_best.pth' # model checkpoint
 
     agent_use_notice = False

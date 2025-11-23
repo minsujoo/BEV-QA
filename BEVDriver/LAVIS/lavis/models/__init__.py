@@ -40,7 +40,16 @@ from lavis.models.blip2_models.blip2_image_text_matching import Blip2ITM
 from lavis.models.blip2_models.blip2_t5_instruct import Blip2T5Instruct
 from lavis.models.blip2_models.blip2_vicuna_instruct import Blip2VicunaInstruct
 
-from lavis.models.blip_diffusion_models.blip_diffusion import BlipDiffusion
+try:
+    from lavis.models.blip_diffusion_models.blip_diffusion import BlipDiffusion
+    _HAS_BLIP_DIFFUSION = True
+except Exception as exc:  # pragma: no cover - defensive import
+    BlipDiffusion = None
+    _HAS_BLIP_DIFFUSION = False
+    logging.getLogger(__name__).warning(
+        "BlipDiffusion import failed (%s); diffusion models will be unavailable.",
+        exc,
+    )
 
 from lavis.models.pnp_vqa_models.pnp_vqa import PNPVQA
 from lavis.models.pnp_vqa_models.pnp_unifiedqav2_fid import PNPUnifiedQAv2FiD
@@ -71,7 +80,7 @@ __all__ = [
     "BlipFeatureExtractor",
     "BlipCaption",
     "BlipClassification",
-    "BlipDiffusion",
+    "BlipDiffusion" if _HAS_BLIP_DIFFUSION else None,
     "BlipITM",
     "BlipNLVR",
     "BlipPretrain",
@@ -94,6 +103,8 @@ __all__ = [
     "Blip2VicunaDrive",
     "BEVQAModel",
 ]
+
+__all__ = [name for name in __all__ if name is not None]
 
 
 def load_model(name, model_type, is_eval=False, device="cpu", checkpoint=None):

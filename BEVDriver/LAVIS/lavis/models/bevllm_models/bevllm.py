@@ -27,7 +27,21 @@ from transformers import BertTokenizer
 class BEVLLMBase(BaseModel):
     @classmethod
     def init_tokenizer(cls, truncation_side="right"):
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side, local_files_only=True)
+        try:
+            tokenizer = BertTokenizer.from_pretrained(
+                "bert-base-uncased",
+                truncation_side=truncation_side,
+                local_files_only=True,
+            )
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "Local bert-base-uncased tokenizer not found; downloading from Hugging Face."
+            )
+            tokenizer = BertTokenizer.from_pretrained(
+                "bert-base-uncased",
+                truncation_side=truncation_side,
+                local_files_only=False,
+            )
         tokenizer.add_special_tokens({"bos_token": "[DEC]"})
         return tokenizer
 

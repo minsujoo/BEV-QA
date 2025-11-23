@@ -1,3 +1,5 @@
+import logging
+
 from .byoanet import *
 from .byobnet import *
 from .cait import *
@@ -45,8 +47,24 @@ from .xception_aligned import *
 from .xcit import *
 from .twins import *
 from .interfuser import *
-from .pointpillar import *
-from .memfuser import *
+
+# Local change (BEV-QA): make pointpillar optional so that missing
+# torch_scatter does not prevent BEV-QA training.
+try:
+    from .pointpillar import *  # type: ignore
+except Exception as exc:  # pragma: no cover - defensive import
+    logging.getLogger(__name__).warning(
+        "pointpillar import failed (%s); point cloud models will be unavailable.",
+        exc,
+    )
+
+try:
+    from .memfuser import *  # type: ignore
+except Exception as exc:  # pragma: no cover - defensive import
+    logging.getLogger(__name__).warning(
+        "memfuser import failed (%s); memfuser models will be unavailable.",
+        exc,
+    )
 from .bevdriver_encoder import *
 from .bevdriver_encoder_train import * 
 

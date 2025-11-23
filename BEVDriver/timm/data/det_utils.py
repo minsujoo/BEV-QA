@@ -2,11 +2,22 @@ import math
 import json
 import os
 import copy
+import logging
 
 from tqdm import tqdm
 from PIL import Image
-import cv2
 import numpy as np
+
+# Local change (BEV-QA): make OpenCV optional to avoid hard dependency
+# for code paths that do not require detection heatmaps.
+try:
+    import cv2  # type: ignore
+except Exception as exc:  # pragma: no cover - defensive import
+    cv2 = None
+    logging.getLogger(__name__).warning(
+        "OpenCV import failed in det_utils (%s); detection heatmaps will be disabled.",
+        exc,
+    )
 
 from skimage.measure import block_reduce
 from .heatmap_utils import generate_heatmap, get_yaw_angle

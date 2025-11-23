@@ -29,6 +29,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from transformers.models.llama.configuration_llama import LlamaConfig
 
@@ -356,7 +357,11 @@ class LlamaAttention(nn.Module):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+            # past_key_value may be (None, None) on the first generation step; ignore in that case.
+            if past_key_value[0] is None or past_key_value[1] is None:
+                past_key_value = None
+            else:
+                kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -683,7 +688,7 @@ LLAMA_START_DOCSTRING = r"""
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
 )
-class LlamaPreTrainedModel(PreTrainedModel):
+class LlamaPreTrainedModel(PreTrainedModel, GenerationMixin):
     config_class = LlamaConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -859,18 +864,31 @@ class LlamaModel(LlamaPreTrainedModel):
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
-            seq_length_with_past = seq_length_with_past + past_key_values_length
+        # In generation, `past_key_values` may be None or contain None entries on the first step.
+        if past_key_values:
+            first_past = past_key_values[0]
+            if first_past is not None and first_past[0] is not None:
+                past_key_values_length = first_past[0].shape[2]
+                seq_length_with_past = seq_length_with_past + past_key_values_length
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
                 past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
             )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
         else:
-            position_ids = position_ids.view(-1, seq_length).long()
+            position_ids = position_ids.long()
+            if position_ids.dim() == 1:
+                position_ids = position_ids.unsqueeze(0)
+            if position_ids.size(0) == 1 and batch_size > 1:
+                position_ids = position_ids.expand(batch_size, -1)
+            elif position_ids.size(0) != batch_size:
+                # fallback: repeat or trim to batch size
+                position_ids = position_ids[:batch_size]
+        # ensure position_ids length matches seq_length
+        if position_ids.size(1) != seq_length:
+            position_ids = position_ids[:, :seq_length]
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1044,9 +1062,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states) # TODO logits to be used
+        logits = self.lm_head(hidden_states)
 
-        # TODO loss calculation
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -1060,10 +1077,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
             if reduction == "none":
-                # loss = loss.view(logits.size(0), -1).sum(1)
                 loss = loss.view(logits.size(0), -1).mean(1)
 
-        return hidden_states
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output

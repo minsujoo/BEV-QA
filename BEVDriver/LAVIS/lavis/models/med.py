@@ -37,12 +37,19 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from transformers.modeling_utils import PreTrainedModel
+try:
+    from transformers.modeling_utils import find_pruneable_heads_and_indices, prune_linear_layer
+except ImportError:
+    def find_pruneable_heads_and_indices(*args, **kwargs):
+        raise NotImplementedError("find_pruneable_heads_and_indices not available in this transformers version.")
+    def prune_linear_layer(layer, index, dim=0):
+        raise NotImplementedError("prune_linear_layer not available in this transformers version.")
+try:
+    from transformers.modeling_utils import apply_chunking_to_forward
+except ImportError:
+    def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+        return forward_fn(*input_tensors)
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 from lavis.common.utils import get_abs_path

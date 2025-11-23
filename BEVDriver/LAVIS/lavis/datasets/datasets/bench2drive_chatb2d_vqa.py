@@ -15,6 +15,7 @@ from .transforms_carla_factory import create_carla_rgb_transform
 
 
 _logger = logging.getLogger(__name__)
+_LAZ_BACKEND = None
 
 
 def lidar_to_histogram_features(lidar: np.ndarray, crop: int = 256) -> np.ndarray:
@@ -58,6 +59,32 @@ def lidar_to_histogram_features(lidar: np.ndarray, crop: int = 256) -> np.ndarra
     features = np.stack([below_features, above_features, total_features], axis=-1)
     features = np.transpose(features, (2, 0, 1)).astype(np.float32)
     return features
+
+
+def _ensure_laz_backend():
+    """Select an available laspy LazBackend and cache it for reuse."""
+    global _LAZ_BACKEND
+    if _LAZ_BACKEND is not None:
+        return True
+
+    try:
+        import laspy
+    except ImportError:
+        return False
+
+    # Prefer lazrs (parallel) > lazrs > laszip if available.
+    candidates = [
+        getattr(laspy.LazBackend, "LazrsParallel", None),
+        getattr(laspy.LazBackend, "Lazrs", None),
+        getattr(laspy.LazBackend, "Laszip", None),
+    ]
+    for cand in candidates:
+        if cand is not None and cand.is_available():
+            _LAZ_BACKEND = cand
+            _logger.info("Selected LAZ backend: %s", cand.name)
+            return True
+
+    return False
 
 
 class Bench2DriveChatB2DVQADataset(Dataset):
@@ -247,8 +274,15 @@ class Bench2DriveChatB2DVQADataset(Dataset):
             _logger.warning("laspy is not installed; using zero LiDAR features.")
             return torch.zeros(bev_shape, dtype=torch.float32)
 
+        if not _ensure_laz_backend():
+            _logger.warning(
+                "No LazBackend available for laspy; using zero LiDAR features. "
+                "Install lazrs or laszip and ensure they are accessible."
+            )
+            return torch.zeros(bev_shape, dtype=torch.float32)
+
         try:
-            with laspy.open(laz_path) as fh:
+            with laspy.open(laz_path, laz_backend=_LAZ_BACKEND) as fh:
                 las = fh.read()
             points = np.vstack([las.x, las.y, las.z]).T.astype(np.float32)
         except Exception as exc:

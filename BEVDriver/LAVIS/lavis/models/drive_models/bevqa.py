@@ -53,7 +53,7 @@ class BEVQAModel(Blip2Base):
         super().__init__()
 
         # LLM imports kept local to avoid global overhead
-        from transformers import LlamaTokenizer
+        from transformers import LlamaTokenizer, GenerationConfig
         from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
         from lavis.models.blip2_models.modeling_opt import OPTForCausalLM
         from transformers import AutoTokenizer
@@ -90,6 +90,17 @@ class BEVQAModel(Blip2Base):
                 llm_model, torch_dtype=torch.float16, low_cpu_mem_usage=True
             )
 
+        # Ensure generation_config exists for newer transformers versions.
+        if getattr(self.llm_model, "generation_config", None) is None:
+            self.llm_model.generation_config = GenerationConfig.from_model_config(self.llm_model.config)
+
+        # Disable generation cache to avoid incompatibilities with custom LLaMA implementation
+        # and simplify generation behavior across transformers versions.
+        if hasattr(self.llm_model, "config"):
+            self.llm_model.config.use_cache = False
+        if getattr(self.llm_model, "generation_config", None) is not None:
+            self.llm_model.generation_config.use_cache = False
+
         # Ensure special tokens exist and resize embeddings
         self.llm_tokenizer.add_special_tokens({"pad_token": "[PAD]"})
         # For some HF checkpoints, reuse </s> as several specials
@@ -123,6 +134,26 @@ class BEVQAModel(Blip2Base):
 
         self.llm_proj = nn.Linear(self.Qformer.config.hidden_size, self.llm_model.config.hidden_size)
         self.max_txt_len = max_txt_len
+
+    def get_optimizer_params(self, weight_decay, lr_scale=1):
+        """
+        Override optimizer grouping to avoid referencing visual_encoder.
+        Groups parameters by weight decay / no decay similar to BaseModel default.
+        """
+        decay, no_decay = [], []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim < 2 or name.endswith(".bias") or "ln" in name or "bn" in name:
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        optim_params = []
+        if decay:
+            optim_params.append({"params": decay, "weight_decay": weight_decay, "lr_scale": lr_scale})
+        if no_decay:
+            optim_params.append({"params": no_decay, "weight_decay": 0.0, "lr_scale": lr_scale})
+        return optim_params
 
     def _encode_bev(self, samples: dict) -> torch.Tensor:
         """Runs BEV encoder and returns token sequence [B, S, D].
@@ -234,7 +265,22 @@ class BEVQAModel(Blip2Base):
             labels=labels,
             return_dict=True,
         )
-        return {"loss": out.loss, "lm_loss": out.loss}
+        if isinstance(out, dict):
+            loss = out.get("loss", None)
+        else:
+            loss = getattr(out, "loss", None)
+        if loss is None:
+            if isinstance(out, (tuple, list)) and len(out) > 0 and torch.is_tensor(out[0]):
+                loss = out[0]
+            elif torch.is_tensor(out):
+                loss = out
+            else:
+                raise RuntimeError("LLM forward did not return a loss term.")
+
+        if torch.is_tensor(loss) and loss.dim() > 0:
+            loss = loss.mean()
+
+        return {"loss": loss, "lm_loss": loss}
 
     @torch.no_grad()
     def generate(
@@ -247,6 +293,11 @@ class BEVQAModel(Blip2Base):
         top_p: float = 0.9,
         repetition_penalty: float = 1.0,
     ) -> List[str]:
+        # NOTE: We implement a custom generation loop instead of relying on
+        # `llm_model.generate` because some PEFT + custom LLaMA combinations
+        # can trigger shape mismatches in HF generation utilities when using
+        # `inputs_embeds` (e.g., zero-length query steps). This path trades
+        # some efficiency for robustness.
         device = samples["rgb"].device
         questions: List[str] = samples["vqa_question"]
 
@@ -266,25 +317,86 @@ class BEVQAModel(Blip2Base):
             return_tensors="pt",
         ).to(device)
         prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids)
-        inputs_embeds = torch.cat([prompt_embeds, vis_tokens], dim=1)
-        attention_mask = torch.cat(
+        prefix_embeds = torch.cat([prompt_embeds, vis_tokens], dim=1)
+        prefix_attn = torch.cat(
             [prompt_tokens.attention_mask, torch.ones(vis_tokens.size()[:2], dtype=torch.long, device=device)],
             dim=1,
         )
 
-        gen_ids = self.llm_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-            do_sample=(num_beams == 1),
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            eos_token_id=self.llm_tokenizer.eos_token_id,
-            pad_token_id=self.llm_tokenizer.pad_token_id,
+        if num_beams != 1:
+            raise NotImplementedError("Beam search (num_beams > 1) is not supported in BEVQAModel.generate.")
+
+        batch_size = prefix_embeds.size(0)
+        eos_token_id = self.llm_tokenizer.eos_token_id
+        pad_token_id = self.llm_tokenizer.pad_token_id
+
+        generated_ids = torch.empty(
+            batch_size, 0, dtype=torch.long, device=device
         )
-        # We only want the generated continuation after the prompt length; decode full and postprocess
-        texts = self.llm_tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for step_idx in range(max_new_tokens):
+            if generated_ids.size(1) > 0:
+                gen_embeds = self.llm_model.get_input_embeddings()(generated_ids)
+                inputs_embeds = torch.cat([prefix_embeds, gen_embeds], dim=1)
+                attn_prefix = prefix_attn
+                attn_gen = torch.ones(
+                    batch_size,
+                    generated_ids.size(1),
+                    dtype=attn_prefix.dtype,
+                    device=device,
+                )
+                attention_mask = torch.cat([attn_prefix, attn_gen], dim=1)
+            else:
+                inputs_embeds = prefix_embeds
+                attention_mask = prefix_attn
+
+            outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+            )
+            logits = outputs.logits[:, -1, :]
+
+            # Avoid immediate termination on the first step; BOS/EOS share the same id in this setup.
+            if step_idx == 0:
+                logits[:, eos_token_id] = -1e9
+
+            if finished.any():
+                logits[finished, :] = -1e9
+                logits[finished, eos_token_id] = 0
+
+            if top_p is not None and 0.0 < top_p < 1.0:
+                probs = torch.softmax(logits, dim=-1)
+                sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+                mask = cumulative_probs > top_p
+                mask[..., 1:] = mask[..., :-1].clone()
+                mask[..., 0] = 0
+                sorted_probs = sorted_probs.masked_fill(mask, 0.0)
+                sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+
+                next_indices = torch.multinomial(sorted_probs, num_samples=1)
+                next_tokens = sorted_indices.gather(-1, next_indices).squeeze(-1)
+            else:
+                next_tokens = torch.argmax(logits, dim=-1)
+
+            generated_ids = torch.cat(
+                [generated_ids, next_tokens.unsqueeze(-1)], dim=1
+            )
+            finished |= next_tokens.eq(eos_token_id)
+
+            if finished.all():
+                break
+
+        full_token_ids = torch.cat(
+            [prompt_tokens.input_ids, generated_ids.to(prompt_tokens.input_ids.device)],
+            dim=1,
+        )
+
+        texts = self.llm_tokenizer.batch_decode(full_token_ids, skip_special_tokens=True)
         # Strip the leading prompt part if present
         cleaned = []
         for p, t in zip(prompts, texts):
