@@ -26,10 +26,20 @@
   - 동작: BEV 인코더 → Q‑Former → LLM로 연결, teacher‑forcing CE 학습 및 `generate()` 지원
   - 입력 키: `rgb`, `rgb_left`, `rgb_right`, `rgb_center`, `lidar`, `measurements`, `vqa_question`(list[str]), `vqa_answer`(list[str])
   - 출력: 학습 `{"loss": lm_loss}`, 평가 `List[str]` 답변
-- 미구현(다음 단계)
-  - Bench2Drive + Chat-B2D VQA 데이터셋 로더/빌더, collate
-  - 프로젝트 설정 파일 `lavis/projects/bevqa/train.yaml`
-  - SPICE 평가 래퍼 `tools/eval/spice_eval.py`
+- 데이터/설정(완료)
+  - Bench2Drive + Chat-B2D VQA 데이터셋:  
+    - 구현 파일: `BEVDriver/LAVIS/lavis/datasets/datasets/bench2drive_chatb2d_vqa.py`
+    - 빌더: `BEVDriver/LAVIS/lavis/datasets/builders/bench2drive_chatb2d_builder.py`
+    - 지원 split: `train`, `val`, 선택적으로 `val_dev`, `val_test`, `test`
+  - 프로젝트 설정: `BEVDriver/LAVIS/lavis/projects/bevqa/train.yaml`
+    - `datasets.bench2drive_chatb2d.build_info.annotations.{train,val}`: Bench2Drive/Chat-B2D 경로
+    - `val_split`: 기존 `val`을 `val_dev`/`val_test`로 나누는 비율 및 시드
+    - `run.train_splits: ["train"]`, `run.valid_splits: ["val_dev"]`, `run.test_splits: ["val_test"]`
+    - early stopping: `early_stop_patience`, `early_stop_min_delta` 기반
+- 평가/스크립트(완료)
+  - SPICE 스타일 평가 래퍼: `BEVDriver/tools/eval/spice_eval.py`
+  - 베스트 체크포인트 평가 스크립트: `BEVDriver/LAVIS/bevqa_eval_best.py`
+    - 지정한 ckpt로 dev/test split에 대해 `{id, pred, ref}` JSON 생성
 
 ### 간단 사용 예(Python)
 ```python
@@ -84,8 +94,8 @@ answers = model.generate(rgb, lidar, question_text, max_len=32, top_p=0.9)
   - 토크나이즈 및 `[BOS] 정답 ... [EOS]` 시프트는 `BEVQAModel.forward` 내부에서 처리
 
 ## 학습 및 설정
-- 손실: CE(언어모델링). 옵티마/스케줄러는 기존(AdamW, cosine 등) 재사용 가능
-- 예시 실행
+- 손실: CE(언어모델링). 옵티마/스케줄러는 기존(AdamW, cosine 등) 재사용
+- 예시 실행(early stopping + dev/test split 사용)
 ```bash
 conda activate bevdriver
 cd BEVDriver/LAVIS
@@ -98,25 +108,42 @@ python -m torch.distributed.run \
   - `datasets: bench2drive_chatb2d` (sensor/language root 경로 설정)
   - `model: bevqa` (인코더 ckpt, LLM 경로, LoRA 여부 등 세부 config)
   - `run.task: bevqa_drive` (검증 단계에서 generate + JSON 저장)
+  - `run.train_splits: ["train"]`
+  - `run.valid_splits: ["val_dev"]` (기존 `val`을 dev/test로 절반 분할한 dev 부분)
+  - `run.test_splits: ["val_test"]` (나머지 절반; pseudo-test 용도)
+  - `run.early_stop_patience`: dev loss 기준 early stopping
 
 ## 평가(SPICE)
-1) 검증 단계 수집
-- `bevqa_drive` task가 자동으로 `model.generate()`를 호출하고 `{id, pred, ref}` 리스트를
-  `BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch{epoch}.json` 로 저장
+### 1) 베스트 체크포인트 평가 및 JSON 수집
+- 학습이 끝나면 `BEVDriver/LAVIS/lavis/out/bevqa/<job_id>/checkpoint_best.pth`가 생성됨
+- 해당 ckpt를 dev/test split에 대해 평가:
+```bash
+conda activate bevdriver
+cd BEVDriver/LAVIS
 
-2) SPICE 스타일 점수 계산
+python bevqa_eval_best.py \
+  --cfg-path lavis/projects/bevqa/train.yaml \
+  --ckpt-path lavis/out/bevqa/<job_id>/checkpoint_best.pth \
+  --options run.skip_generate=false run.valid_splits=[\"val_dev\"] run.test_splits=[\"val_test\"]
+```
+- `bevqa_drive` task가 자동으로 `model.generate()`를 호출하고 `{id, pred, ref}` 리스트를
+  `BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_dev_bevqa_epoch{epoch}.json`  
+  `BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch{epoch}.json` 형식으로 저장
+
+### 2) SPICE 스타일 점수 계산
 ```bash
 python BEVDriver/tools/eval/spice_eval.py \
-  --file BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch0.json
+  --file BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch{epoch}.json
 ```
 - 현재는 토큰 단위 F1 기반 pseudo-SPICE (필요 시 실제 SPICE 스크립트로 교체 가능)
+ - 공식 Chat-B2D test 어노테이션이 없으므로, 기본 설정에서는 `val`을 dev/test로 나눠 pseudo-test로 사용하고 있음을 문서/논문에 명시하는 것이 좋음.
 
 ## 구현 체크리스트
 - [x] Waypoint 헤드/로스 제거 및 `forward` 정리
-- [ ] Bench2Drive + Chat-B2D Dataset/Collate/토크나이저 구현
+- [x] Bench2Drive + Chat-B2D Dataset/Collate/토크나이저 구현
 - [x] LLM `generate()` 경로 및 CE 손실 적용
-- [ ] SPICE 평가 래퍼 연동 및 메트릭 로깅
-- [ ] `train.yaml` 하이퍼파라미터/경로 정리
+- [x] SPICE 평가 래퍼 및 {id,pred,ref} JSON 저장
+- [x] `train.yaml` 하이퍼파라미터/경로 정리 및 dev/test split 옵션
 
 ## 주의 사항
 - 번들된 `LAVIS`/`timm` 사용(업스트림 pip 패키지로 교체 금지)

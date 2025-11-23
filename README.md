@@ -8,8 +8,13 @@ Key capabilities
 - Training objective is language modeling cross‑entropy on answer tokens.
 
 Project status
-- Implemented: model and registry wiring (`lavis/models/drive_models/bevqa.py`), docs.
-- Pending: Bench2Drive + Chat-B2D dataset loader, training config, SPICE evaluation wrapper. See `docs/BEV-QA.md`.
+- Implemented:
+  - Model and registry wiring (`BEVDriver/LAVIS/lavis/models/drive_models/bevqa.py`)
+  - Bench2Drive + Chat-B2D dataset loader + builder
+  - Training config (`lavis/projects/bevqa/train.yaml`) with `train` + `val_dev`/`val_test` split and early stopping
+  - Evaluation script for best checkpoints (`BEVDriver/LAVIS/bevqa_eval_best.py`)
+  - Pseudo‑SPICE evaluation wrapper (`BEVDriver/tools/eval/spice_eval.py`)
+- See `docs/BEV-QA.md` for detailed architecture and training/eval instructions.
 
 Repository structure (selected)
 - `BEVDriver/LAVIS/lavis/models/drive_models/bevqa.py`: BEV‑QA model.
@@ -62,15 +67,22 @@ Training
   For multi-GPU training, increase `--nproc_per_node` (e.g., 4) and optionally set `run.world_size` in the config.
 
 Validation / SPICE-style evaluation
-- Validation automatically runs `model.generate()` and stores `{id, pred, ref}` JSON under `BEVDriver/LAVIS/out/bevqa/<job_id>/`.
-- Run the pseudo-SPICE wrapper on that file:
+- During training, the `bevqa_drive` task can run validation on the configured split(s) and store `{id, pred, ref}` JSON under `BEVDriver/LAVIS/lavis/out/bevqa/<job_id>/`.
+- After training, you can evaluate a specific checkpoint (e.g., best epoch) with:
+  ```bash
+  conda activate bevdriver
+  cd BEVDriver/LAVIS
+  python bevqa_eval_best.py \
+    --cfg-path lavis/projects/bevqa/train.yaml \
+    --ckpt-path lavis/out/bevqa/<job_id>/checkpoint_best.pth \
+    --options run.skip_generate=false run.valid_splits=[\"val_dev\"] run.test_splits=[\"val_test\"]
+  ```
+- This writes JSON files such as `val_dev_bevqa_epoch{epoch}.json` and `val_test_bevqa_epoch{epoch}.json` under `BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/`.
+- Run the pseudo-SPICE wrapper on the held‑out split (e.g. `val_test`):
   ```bash
   python BEVDriver/tools/eval/spice_eval.py \
-    --file BEVDriver/LAVIS/out/bevqa/<job_id>/val_bevqa_epoch0.json
+    --file BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch{epoch}.json
   ```
-
-Evaluation (coming soon)
-- VQA text metrics with SPICE. A wrapper will be provided under `BEVDriver/tools/eval/spice_eval.py`.
 
 License and acknowledgements
 - See `LICENSE`. This work builds on BEVDriver, LAVIS, and related open‑source projects.
