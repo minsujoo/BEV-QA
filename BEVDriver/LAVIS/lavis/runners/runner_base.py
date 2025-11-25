@@ -363,6 +363,7 @@ class RunnerBase:
         # early stopping states
         early_stop_patience = int(self.config.run_cfg.get("early_stop_patience", 0))
         early_stop_min_delta = float(self.config.run_cfg.get("early_stop_min_delta", 0.0))
+        early_stop_split = str(self.config.run_cfg.get("early_stop_split", "val"))
         epochs_no_improve = 0
         stop_training = False
 
@@ -401,11 +402,11 @@ class RunnerBase:
                         agg_metrics = float(val_log["agg_metrics"])
                         improved = agg_metrics < (best_agg_metric - early_stop_min_delta)
 
-                        if improved and split_name == "val":
+                        if improved and split_name == early_stop_split:
                             best_epoch, best_agg_metric = cur_epoch, agg_metrics
                             epochs_no_improve = 0
                             self._save_checkpoint(cur_epoch, is_best=True)
-                        elif split_name == "val":
+                        elif split_name == early_stop_split:
                             epochs_no_improve += 1
 
                         # log stats (including best_epoch)

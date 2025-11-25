@@ -5,7 +5,6 @@ Bench2Drive + Chat-B2D VQA dataset builder.
 import random
 from typing import Optional
 
-import torch
 from torch.utils.data import Subset
 
 from lavis.common.registry import registry
@@ -37,7 +36,7 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
         build_info = self.config.build_info
         ann_info = build_info.annotations
 
-        # Optional config to derive val_dev/val_test from val.
+        # Optional config to derive val_dev / val_test from the provided val.
         val_split_cfg = self.config.get("val_split", None)
         dev_ratio: Optional[float] = None
         dev_size: Optional[int] = None
@@ -50,49 +49,9 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
         datasets = {}
         val_dataset_cache = None
 
+        # Build declared splits (train/val/test)
         for split in ann_info.keys():
-            if split not in ["train", "val", "test", "val_dev", "val_test"]:
-                continue
-
-            # Handle derived splits from val
-            if split in ("val_dev", "val_test") and val_split_cfg is not None:
-                if val_dataset_cache is None:
-                    base_val_cfg = ann_info.get("val", None)
-                    if base_val_cfg is None:
-                        continue
-                    val_dataset_cache = Bench2DriveChatB2DVQADataset(
-                        sensor_root=base_val_cfg.sensor_root,
-                        language_root=base_val_cfg.language_root,
-                        split="val",
-                        is_training=False,
-                        input_rgb_size=base_val_cfg.get("input_rgb_size", 224),
-                        input_multi_view_size=base_val_cfg.get("input_multi_view_size", 112),
-                        input_lidar_size=base_val_cfg.get("input_lidar_size", 224),
-                    )
-
-                total = len(val_dataset_cache)
-                if total == 0:
-                    datasets[split] = None
-                    continue
-
-                rng = random.Random(split_seed)
-                indices = list(range(total))
-                rng.shuffle(indices)
-
-                if dev_size is not None:
-                    dev_len = min(dev_size, total)
-                elif dev_ratio is not None:
-                    dev_len = max(1, int(total * float(dev_ratio)))
-                else:
-                    dev_len = total // 2
-
-                dev_indices = indices[:dev_len]
-                test_indices = indices[dev_len:]
-
-                if split == "val_dev":
-                    datasets[split] = SubsetWithCollater(val_dataset_cache, dev_indices)
-                else:
-                    datasets[split] = SubsetWithCollater(val_dataset_cache, test_indices)
+            if split not in ["train", "val", "test"]:
                 continue
 
             split_cfg = ann_info.get(split)
@@ -106,11 +65,34 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
             datasets[split] = Bench2DriveChatB2DVQADataset(
                 sensor_root=sensor_root,
                 language_root=language_root,
-                split=split if split in ("train", "val", "test") else "val",
+                split=split,
                 is_training=(split == "train"),
                 input_rgb_size=input_rgb_size,
                 input_multi_view_size=input_multi_view_size,
                 input_lidar_size=input_lidar_size,
             )
 
+            if split == "val" and val_split_cfg is not None:
+                val_dataset_cache = datasets[split]
+
+        # Derive val_dev / val_test from val if configured and available.
+        if val_dataset_cache is not None and len(val_dataset_cache) > 0:
+            rng = random.Random(split_seed)
+            indices = list(range(len(val_dataset_cache)))
+            rng.shuffle(indices)
+
+            if dev_size is not None:
+                dev_len = min(dev_size, len(val_dataset_cache))
+            elif dev_ratio is not None:
+                dev_len = max(1, int(len(val_dataset_cache) * float(dev_ratio)))
+            else:
+                dev_len = len(val_dataset_cache) // 2
+
+            dev_indices = indices[:dev_len]
+            test_indices = indices[dev_len:]
+
+            datasets["val_dev"] = SubsetWithCollater(val_dataset_cache, dev_indices)
+            datasets["val_test"] = SubsetWithCollater(val_dataset_cache, test_indices)
+
         return datasets
+

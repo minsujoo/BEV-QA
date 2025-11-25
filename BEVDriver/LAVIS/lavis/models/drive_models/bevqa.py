@@ -224,6 +224,8 @@ class BEVQAModel(Blip2Base):
             bev_tokens = bev_memory
 
         vis_tokens = self._qformer_visual_tokens(bev_tokens)  # [B, Q, H]
+        llm_dtype = self.llm_model.get_input_embeddings().weight.dtype
+        vis_tokens = vis_tokens.to(llm_dtype)
 
         prompts = self._build_prompt(questions)
 
@@ -244,8 +246,8 @@ class BEVQAModel(Blip2Base):
         ).to(device)
 
         # Build inputs_embeds = [prompt_embeds, vis_tokens, answer_embeds]
-        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids)
-        answer_embeds = self.llm_model.get_input_embeddings()(answer_tokens.input_ids)
+        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids).to(llm_dtype)
+        answer_embeds = self.llm_model.get_input_embeddings()(answer_tokens.input_ids).to(llm_dtype)
 
         inputs_embeds = torch.cat([prompt_embeds, vis_tokens, answer_embeds], dim=1)
 
@@ -307,6 +309,8 @@ class BEVQAModel(Blip2Base):
             bev_tokens = bev_memory
 
         vis_tokens = self._qformer_visual_tokens(bev_tokens)  # [B, Q, H]
+        llm_dtype = self.llm_model.get_input_embeddings().weight.dtype
+        vis_tokens = vis_tokens.to(llm_dtype)
 
         prompts = self._build_prompt(questions)
         prompt_tokens = self.llm_tokenizer(
@@ -316,7 +320,7 @@ class BEVQAModel(Blip2Base):
             max_length=self.max_txt_len,
             return_tensors="pt",
         ).to(device)
-        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids)
+        prompt_embeds = self.llm_model.get_input_embeddings()(prompt_tokens.input_ids).to(llm_dtype)
         prefix_embeds = torch.cat([prompt_embeds, vis_tokens], dim=1)
         prefix_attn = torch.cat(
             [prompt_tokens.attention_mask, torch.ones(vis_tokens.size()[:2], dtype=torch.long, device=device)],

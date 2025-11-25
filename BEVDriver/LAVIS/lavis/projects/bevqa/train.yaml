@@ -63,6 +63,8 @@ run:
   # Set patience <= 0 to disable.
   early_stop_patience: 2
   early_stop_min_delta: 0.0
+  # Use val_dev split for early stopping.
+  early_stop_split: "val_dev"
 
   # Debug options: limit steps per epoch for quick smoke tests.
   # Set to null or omit when running full training.
