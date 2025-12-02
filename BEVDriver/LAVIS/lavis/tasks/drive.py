@@ -245,7 +245,8 @@ class BEVQADriveTask(DriveTask):
                 writer.add_scalar("val/%s_epoch" % key, metrics[key], epoch)
 
         if out_str:
-            logging.info("Eval Epoch %d, %s", epoch, out_str)
+            # Local change: use string placeholder to allow non-integer epoch labels (e.g., "best").
+            logging.info("Eval Epoch %s, %s", epoch, out_str)
 
         if "loss" in metrics:
             metrics["agg_metrics"] = metrics["loss"]

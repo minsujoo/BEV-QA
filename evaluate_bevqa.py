@@ -1,6 +1,6 @@
 """
 Evaluate a trained BEV-QA model on a validation split and report SPICE (primary),
-optionally BLEU-4 and CIDEr, while also saving per-example predictions for
+plus BERTScore and ROUGE-L by default, while also saving per-example predictions for
 qualitative analysis.
 """
 
@@ -11,9 +11,11 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List
-
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from tqdm.auto import tqdm
 
 # Ensure bundled LAVIS package is on the path (repo-local).
 REPO_ROOT = Path(__file__).resolve().parent
@@ -73,7 +75,26 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help="Optional config overrides in key=value format (same as LAVIS runner).",
     )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=192,
+        help="Max tokens to generate per answer (increase to avoid truncation).",
+    )
+    parser.add_argument(
+        "--bert-model",
+        default="roberta-large",
+        help="Model name for BERTScore (e.g., roberta-large, microsoft/deberta-xlarge-mnli).",
+    )
     return parser.parse_args()
+
+
+def is_dist_avail_and_initialized():
+    return dist.is_available() and dist.is_initialized()
+
+
+def is_main_process():
+    return (not is_dist_avail_and_initialized()) or dist.get_rank() == 0
 
 
 def build_dataloader(task, cfg: Config, split: str, batch_size: int, num_workers: int):
@@ -86,13 +107,17 @@ def build_dataloader(task, cfg: Config, split: str, batch_size: int, num_workers
     dataset = datasets[dataset_name][split]
 
     collate_fn = getattr(dataset, "collater", None)
+    sampler = None
+    if is_dist_avail_and_initialized():
+        sampler = DistributedSampler(dataset, shuffle=False)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=False if sampler is None else False,
         num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
+        sampler=sampler,
     )
     return dataloader
 
@@ -102,24 +127,59 @@ def move_to_device(samples: Dict, device: torch.device) -> Dict:
     return prepare_sample(samples, cuda_enabled=device.type == "cuda")
 
 
-def compute_metrics(gts: Dict, hyps: Dict) -> Dict[str, float]:
-    from pycocoevalcap.spice.spice import Spice
-    from pycocoevalcap.bleu.bleu import Bleu
-    from pycocoevalcap.cider.cider import Cider
-
+def compute_metrics(
+    gts: Dict,
+    hyps: Dict,
+    *,
+    use_spice: bool = True,
+    use_bertscore: bool = True,
+    use_rouge: bool = True,
+    bert_model: str = None,
+) -> Dict[str, float]:
     metrics = {}
 
-    spice_scorer = Spice()
-    spice_score, _ = spice_scorer.compute_score(gts, hyps)
-    metrics["SPICE"] = spice_score
+    if use_spice:
+        from pycocoevalcap.spice.spice import Spice
 
-    bleu_scorer = Bleu(4)
-    bleu_scores, _ = bleu_scorer.compute_score(gts, hyps)
-    metrics["BLEU-4"] = bleu_scores[3]  # index 3 corresponds to BLEU-4
+        spice_scorer = Spice()
+        spice_score, _ = spice_scorer.compute_score(gts, hyps)
+        metrics["SPICE"] = spice_score
 
-    cider_scorer = Cider()
-    cider_score, _ = cider_scorer.compute_score(gts, hyps)
-    metrics["CIDEr"] = cider_score
+    if use_bertscore:
+        try:
+            from bert_score import score as bert_score
+        except ImportError:
+            logging.warning("bert_score is not installed; skipping BERTScore.")
+        else:
+            if bert_model is None:
+                bert_model = "roberta-large"
+            # Flatten refs/hyps using consistent key order.
+            keys = sorted(gts.keys())
+            refs = [gts[k][0] for k in keys]
+            hyps_list = [hyps[k][0] for k in keys]
+            P, R, F1 = bert_score(
+                hyps_list,
+                refs,
+                model_type=bert_model if bert_model else None,
+                verbose=False,
+            )
+            metrics["BERTScore_P"] = float(P.mean())
+            metrics["BERTScore_R"] = float(R.mean())
+            metrics["BERTScore_F1"] = float(F1.mean())
+
+    if use_rouge:
+        try:
+            from rouge_score import rouge_scorer
+        except ImportError:
+            logging.warning("rouge_score is not installed; skipping ROUGE-L.")
+        else:
+            scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+            keys = sorted(gts.keys())
+            refs = [gts[k][0] for k in keys]
+            hyps_list = [hyps[k][0] for k in keys]
+            scores = [scorer.score(ref, hyp)["rougeL"].fmeasure for ref, hyp in zip(refs, hyps_list)]
+            if scores:
+                metrics["ROUGE-L"] = float(sum(scores) / len(scores))
 
     return metrics
 
@@ -127,6 +187,17 @@ def compute_metrics(gts: Dict, hyps: Dict) -> Dict[str, float]:
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Distributed setup (torchrun)
+    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        args.device = "cuda"
+        if is_main_process():
+            logging.info("Running distributed evaluation with world_size=%d", dist.get_world_size())
+    else:
+        local_rank = None
 
     # Robust device selection: fall back to CPU if CUDA is not available/healthy.
     if args.device.startswith("cuda"):
@@ -190,11 +261,17 @@ def main():
     gts: Dict[str, List[str]] = {}
     hyps: Dict[str, List[str]] = {}
 
+    progress = tqdm(
+        total=len(dataloader),
+        disable=not is_main_process(),
+        desc="Evaluating",
+    )
+
     with torch.no_grad():
         for samples in dataloader:
             samples = move_to_device(samples, device)
 
-            preds = model.generate(samples)
+            preds = model.generate(samples, max_new_tokens=args.max_new_tokens)
             ids = samples["id"]
             questions = samples["vqa_question"]
             refs = samples["vqa_answer"]
@@ -212,17 +289,65 @@ def main():
                 gts[sid_str] = [ref]
                 hyps[sid_str] = [pred]
 
-    metrics = compute_metrics(gts, hyps)
-    logging.info("Evaluation metrics: %s", metrics)
+            progress.update(1)
 
-    # Save qualitative results
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    logging.info("Saved detailed results to %s", os.path.abspath(args.output))
+    progress.close()
 
-    # Print metrics for convenience
-    for k, v in metrics.items():
-        print(f"{k}: {v:.4f}")
+    # Gather results from all ranks.
+    if is_dist_avail_and_initialized():
+        gather_list = None
+        obj = {"records": records, "gts": gts, "hyps": hyps}
+        if is_main_process():
+            gather_list = [None for _ in range(dist.get_world_size())]
+        dist.gather_object(obj, gather_list, dst=0)
+
+        if is_main_process():
+            merged_records = []
+            merged_gts = {}
+            merged_hyps = {}
+            for item in gather_list:
+                if not item:
+                    continue
+                merged_records.extend(item["records"])
+                merged_gts.update(item["gts"])
+                merged_hyps.update(item["hyps"])
+            records, gts, hyps = merged_records, merged_gts, merged_hyps
+    # If not distributed, records/gts/hyps are already local.
+
+    if is_main_process():
+        metrics = compute_metrics(
+            gts,
+            hyps,
+            use_spice=True,
+            use_bertscore=True,
+            use_rouge=True,
+            bert_model=args.bert_model,
+        )
+        logging.info("Evaluation metrics: %s", metrics)
+
+        # Save qualitative results (per-example predictions).
+        output_path = Path(args.output)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+        logging.info("Saved detailed results to %s", os.path.abspath(str(output_path)))
+
+        # Save aggregate metrics alongside, in a separate JSON file.
+        metrics_path = output_path.with_name(output_path.stem + "_metrics" + output_path.suffix)
+        metrics_obj = {
+            "metrics": metrics,
+            "num_examples": len(records),
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics_obj, f, ensure_ascii=False, indent=2)
+        logging.info("Saved aggregate metrics to %s", os.path.abspath(str(metrics_path)))
+
+        # Print metrics for convenience
+        for k, v in metrics.items():
+            print(f"{k}: {v:.4f}")
+
+    if is_dist_avail_and_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

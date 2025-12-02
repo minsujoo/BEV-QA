@@ -370,7 +370,8 @@ class RunnerBase:
         self.log_config()
 
         # resume from checkpoint if specified
-        if not self.evaluate_only and self.resume_ckpt_path is not None:
+        # Local change: allow loading a checkpoint even in evaluate-only mode.
+        if self.resume_ckpt_path is not None:
             self._load_checkpoint(self.resume_ckpt_path)
 
         for cur_epoch in range(self.start_epoch, self.max_epoch):

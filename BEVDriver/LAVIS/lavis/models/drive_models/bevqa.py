@@ -206,7 +206,7 @@ class BEVQAModel(Blip2Base):
         return vis
 
     def _build_prompt(self, questions: List[str]) -> List[str]:
-        # Simple instruction style prompt
+        # Keep prompt simple and aligned with training targets.
         return [f"Question: {q}\nAnswer:" for q in questions]
 
     def forward(self, samples: dict, *, bev_memory: Optional[torch.Tensor] = None):
@@ -404,11 +404,46 @@ class BEVQAModel(Blip2Base):
         # Strip the leading prompt part if present
         cleaned = []
         for p, t in zip(prompts, texts):
-            idx = t.lower().find("answer:")
-            if idx >= 0:
-                ans = t[idx + len("answer:") :].strip()
+            # Remove any leading prompt (question/answer) that leaked into the decode.
+            lower_t = t.lower()
+            markers = [
+                "answer in one concise, complete sentence:",
+                "answer:",
+            ]
+            cut_idx = -1
+            for m in markers:
+                pos = lower_t.rfind(m)  # use the last occurrence to be safe
+                if pos >= 0:
+                    cut_idx = pos + len(m)
+                    break
+            if cut_idx >= 0:
+                ans = t[cut_idx:].strip()
             else:
                 ans = t.strip()
+            ans_raw = ans  # fallback copy before aggressive cleaning
+
+            # Post-process to avoid leading punctuation and trailing fragments.
+            ans = ans.lstrip(" ,.#")
+            for tail in (" and", " a", " the", " of", " to", " in", ","):
+                if ans.endswith(tail):
+                    ans = ans[: -len(tail)].rstrip()
+
+            # Heuristic trim: keep the first sentence if multiple are present.
+            parts = [s.strip() for s in ans.split(".") if s.strip()]
+            if len(parts) > 1:
+                ans = parts[0]
+
+            # Hard cap on length to avoid run-on/hallucinations.
+            words = ans.split()
+            if len(words) > 60:
+                ans = " ".join(words[:60]).rstrip(" ,.")
+
+            # Fallback if trimming produced an empty string.
+            if not ans:
+                ans = ans_raw if ans_raw else t.strip()
+            if not ans:
+                ans = "N/A"
+
             cleaned.append(ans)
         return cleaned
 
