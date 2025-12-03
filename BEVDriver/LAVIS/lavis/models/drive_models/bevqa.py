@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Optional, Tuple
 
 import torch
@@ -49,6 +50,7 @@ class BEVQAModel(Blip2Base):
         max_txt_len: int = 128,
         num_query_token: int = 32,
         has_lora: bool = True,
+        first_sentence_only: bool = False,
     ):
         super().__init__()
 
@@ -109,6 +111,7 @@ class BEVQAModel(Blip2Base):
 
         # Optional LoRA fine-tuning
         self.has_lora = has_lora
+        self.first_sentence_only = first_sentence_only
         if has_lora:
             from peft import LoraConfig, get_peft_model
 
@@ -207,7 +210,17 @@ class BEVQAModel(Blip2Base):
 
     def _build_prompt(self, questions: List[str]) -> List[str]:
         # Keep prompt simple and aligned with training targets.
-        return [f"Question: {q}\nAnswer:" for q in questions]
+        return [
+            f"Question: {q}\nAnswer with details about weather, road condition, vehicles, signals, and surroundings:"
+            for q in questions
+        ]
+
+    @staticmethod
+    def _first_sentence(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        parts = re.split(r"(?<=[.!?])\s+", text.strip())
+        return parts[0] if parts else text
 
     def forward(self, samples: dict, *, bev_memory: Optional[torch.Tensor] = None):
         """
@@ -217,6 +230,8 @@ class BEVQAModel(Blip2Base):
         device = samples["rgb"].device
         questions: List[str] = samples["vqa_question"]
         answers: List[str] = samples["vqa_answer"]
+        if self.first_sentence_only:
+            answers = [self._first_sentence(a) for a in answers]
 
         if bev_memory is None:
             bev_tokens = self._encode_bev(samples)  # [B, S, D]
@@ -428,16 +443,6 @@ class BEVQAModel(Blip2Base):
                 if ans.endswith(tail):
                     ans = ans[: -len(tail)].rstrip()
 
-            # Heuristic trim: keep the first sentence if multiple are present.
-            parts = [s.strip() for s in ans.split(".") if s.strip()]
-            if len(parts) > 1:
-                ans = parts[0]
-
-            # Hard cap on length to avoid run-on/hallucinations.
-            words = ans.split()
-            if len(words) > 60:
-                ans = " ".join(words[:60]).rstrip(" ,.")
-
             # Fallback if trimming produced an empty string.
             if not ans:
                 ans = ans_raw if ans_raw else t.strip()
@@ -457,6 +462,7 @@ class BEVQAModel(Blip2Base):
         max_txt_len = cfg.get("max_txt_len", 64)
         num_query_token = cfg.get("num_query_token", 32)
         has_lora = cfg.get("has_lora", True)
+        first_sentence_only = cfg.get("first_sentence_only", False)
 
         return cls(
             encoder_model=encoder_model,
@@ -467,4 +473,5 @@ class BEVQAModel(Blip2Base):
             max_txt_len=max_txt_len,
             num_query_token=num_query_token,
             has_lora=has_lora,
+            first_sentence_only=first_sentence_only,
         )

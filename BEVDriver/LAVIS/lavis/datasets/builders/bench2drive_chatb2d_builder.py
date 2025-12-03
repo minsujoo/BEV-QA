@@ -2,7 +2,9 @@
 Bench2Drive + Chat-B2D VQA dataset builder.
 """
 
+import json
 import random
+import re
 from typing import Optional
 
 from torch.utils.data import Subset
@@ -28,6 +30,7 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
 
     def __init__(self, cfg=None):
         self.config = cfg
+        self._coord_pattern = re.compile(r"<-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?>")
 
     def build_datasets(self):
         return self.build()
@@ -35,6 +38,7 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
     def build(self):
         build_info = self.config.build_info
         ann_info = build_info.annotations
+        filter_coords = bool(getattr(self.config, "filter_coord_answers", False))
 
         # Optional config to derive val_dev / val_test from the provided val.
         val_split_cfg = self.config.get("val_split", None)
@@ -62,7 +66,7 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
             input_multi_view_size = split_cfg.get("input_multi_view_size", 112)
             input_lidar_size = split_cfg.get("input_lidar_size", 224)
 
-            datasets[split] = Bench2DriveChatB2DVQADataset(
+            ds = Bench2DriveChatB2DVQADataset(
                 sensor_root=sensor_root,
                 language_root=language_root,
                 split=split,
@@ -71,6 +75,43 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
                 input_multi_view_size=input_multi_view_size,
                 input_lidar_size=input_lidar_size,
             )
+            if filter_coords and len(ds) > 0:
+                keep_indices = []
+                dropped = 0
+
+                for idx, meta in enumerate(ds.samples):
+                    try:
+                        with open(meta["json_path"], "r") as f:
+                            convo = json.load(f)
+                    except Exception:
+                        # If JSON is unreadable, drop it.
+                        dropped += 1
+                        continue
+
+                    drop = False
+                    for turn in convo:
+                        if not isinstance(turn, list):
+                            continue
+                        for msg in turn:
+                            if msg.get("from", "") == "gpt":
+                                val = str(msg.get("value", ""))
+                                if self._coord_pattern.search(val):
+                                    drop = True
+                                    break
+                        if drop:
+                            break
+                    if drop:
+                        dropped += 1
+                    else:
+                        keep_indices.append(idx)
+
+                if dropped > 0:
+                    ds = SubsetWithCollater(ds, keep_indices)
+                    print(
+                        f"[bench2drive_chatb2d] filtered {dropped} / {len(keep_indices)+dropped} samples with coordinate-like answers in split {split}."
+                    )
+
+            datasets[split] = ds
 
             if split == "val" and val_split_cfg is not None:
                 val_dataset_cache = datasets[split]
@@ -95,4 +136,3 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
             datasets["val_test"] = SubsetWithCollater(val_dataset_cache, test_indices)
 
         return datasets
-

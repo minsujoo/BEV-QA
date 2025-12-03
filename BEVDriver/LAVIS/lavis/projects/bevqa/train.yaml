@@ -11,6 +11,10 @@ model:
   max_txt_len: 192
   num_query_token: 32
   has_lora: True
+  first_sentence_only: False
+  # Filter out samples whose answers contain coordinate-like patterns "<x,y>".
+  # Set to False to keep all samples.
+  filter_coord_answers: True
 
 datasets:
   bench2drive_chatb2d: # name of the dataset builder
