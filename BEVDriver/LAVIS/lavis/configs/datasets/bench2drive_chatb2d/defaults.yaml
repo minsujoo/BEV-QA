@@ -17,4 +17,5 @@ datasets:
           input_rgb_size: 224
           input_multi_view_size: 112
           input_lidar_size: 224
-
+    # Optional: drop samples whose answers contain coordinate-like patterns "<x,y>"
+    filter_coord_answers: false

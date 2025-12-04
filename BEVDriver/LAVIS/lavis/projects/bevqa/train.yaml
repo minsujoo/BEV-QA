@@ -14,7 +14,7 @@ model:
   first_sentence_only: False
   # Filter out samples whose answers contain coordinate-like patterns "<x,y>".
   # Set to False to keep all samples.
-  filter_coord_answers: True
+  filter_coord_answers: False
 
 datasets:
   bench2drive_chatb2d: # name of the dataset builder
@@ -47,6 +47,8 @@ datasets:
     val_split:
       dev_ratio: 0.5  # or set dev_size: N to use an absolute count
       seed: 42
+    # Filter out samples whose answers contain coordinate-like patterns "<x,y>".
+    filter_coord_answers: False
 
 run:
   task: bevqa_drive

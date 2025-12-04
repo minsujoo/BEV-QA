@@ -30,7 +30,8 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
 
     def __init__(self, cfg=None):
         self.config = cfg
-        self._coord_pattern = re.compile(r"<-?\\d+(?:\\.\\d+)?\\s*,\\s*-?\\d+(?:\\.\\d+)?>")
+        # Matches coordinates like "<12.3, -4.56>"
+        self._coord_pattern = re.compile(r"<-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?>")
 
     def build_datasets(self):
         return self.build()

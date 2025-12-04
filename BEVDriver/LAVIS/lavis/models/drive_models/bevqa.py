@@ -274,7 +274,8 @@ class BEVQAModel(Blip2Base):
         # Labels: ignore prompt + visual tokens; supervise only on answer tokens
         ignore = torch.full(attn_prompt.size(), -100, dtype=torch.long, device=device)
         ignore_vis = torch.full(attn_vis.size(), -100, dtype=torch.long, device=device)
-        labels = torch.cat([ignore, ignore_vis, answer_tokens.input_ids], dim=1)
+        answer_labels = answer_tokens.input_ids.masked_fill(answer_tokens.attention_mask == 0, -100)
+        labels = torch.cat([ignore, ignore_vis, answer_labels], dim=1)
 
         out = self.llm_model(
             inputs_embeds=inputs_embeds,
