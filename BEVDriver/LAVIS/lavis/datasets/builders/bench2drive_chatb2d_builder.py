@@ -40,6 +40,10 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
         build_info = self.config.build_info
         ann_info = build_info.annotations
         filter_coords = bool(getattr(self.config, "filter_coord_answers", False))
+        train_sample_mode = getattr(self.config, "train_sample_mode", "random")
+        train_sample_first_prob = float(getattr(self.config, "train_sample_first_prob", 0.0))
+        eval_sample_mode = getattr(self.config, "eval_sample_mode", "first")
+        eval_sample_first_prob = float(getattr(self.config, "eval_sample_first_prob", 1.0))
 
         # Optional config to derive val_dev / val_test from the provided val.
         val_split_cfg = self.config.get("val_split", None)
@@ -66,6 +70,12 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
             input_rgb_size = split_cfg.get("input_rgb_size", 224)
             input_multi_view_size = split_cfg.get("input_multi_view_size", 112)
             input_lidar_size = split_cfg.get("input_lidar_size", 224)
+            if split == "train":
+                sample_mode = train_sample_mode
+                sample_first_prob = train_sample_first_prob
+            else:
+                sample_mode = eval_sample_mode
+                sample_first_prob = eval_sample_first_prob
 
             ds = Bench2DriveChatB2DVQADataset(
                 sensor_root=sensor_root,
@@ -75,42 +85,10 @@ class Bench2DriveChatB2DBuilder(BaseDatasetBuilder):
                 input_rgb_size=input_rgb_size,
                 input_multi_view_size=input_multi_view_size,
                 input_lidar_size=input_lidar_size,
+                sample_mode=sample_mode,
+                sample_first_prob=sample_first_prob,
+                drop_coord_answers=filter_coords,
             )
-            if filter_coords and len(ds) > 0:
-                keep_indices = []
-                dropped = 0
-
-                for idx, meta in enumerate(ds.samples):
-                    try:
-                        with open(meta["json_path"], "r") as f:
-                            convo = json.load(f)
-                    except Exception:
-                        # If JSON is unreadable, drop it.
-                        dropped += 1
-                        continue
-
-                    drop = False
-                    for turn in convo:
-                        if not isinstance(turn, list):
-                            continue
-                        for msg in turn:
-                            if msg.get("from", "") == "gpt":
-                                val = str(msg.get("value", ""))
-                                if self._coord_pattern.search(val):
-                                    drop = True
-                                    break
-                        if drop:
-                            break
-                    if drop:
-                        dropped += 1
-                    else:
-                        keep_indices.append(idx)
-
-                if dropped > 0:
-                    ds = SubsetWithCollater(ds, keep_indices)
-                    print(
-                        f"[bench2drive_chatb2d] filtered {dropped} / {len(keep_indices)+dropped} samples with coordinate-like answers in split {split}."
-                    )
 
             datasets[split] = ds
 

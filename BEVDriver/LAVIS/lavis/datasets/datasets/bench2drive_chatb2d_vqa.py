@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 from typing import Dict, List
 
 import numpy as np
@@ -16,6 +17,7 @@ from .transforms_carla_factory import create_carla_rgb_transform
 
 _logger = logging.getLogger(__name__)
 _LAZ_BACKEND = None
+_COORD_PATTERN = re.compile(r"<-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?>")
 
 
 def lidar_to_histogram_features(lidar: np.ndarray, crop: int = 256) -> np.ndarray:
@@ -122,6 +124,9 @@ class Bench2DriveChatB2DVQADataset(Dataset):
         input_rgb_size: int = 224,
         input_multi_view_size: int = 112,
         input_lidar_size: int = 224,
+        sample_mode: str = "random",
+        sample_first_prob: float = 0.0,
+        drop_coord_answers: bool = False,
     ) -> None:
         super().__init__()
 
@@ -129,6 +134,9 @@ class Bench2DriveChatB2DVQADataset(Dataset):
         self.language_root = language_root
         self.split = split
         self.is_training = is_training
+        self.sample_mode = sample_mode
+        self.sample_first_prob = sample_first_prob
+        self.drop_coord_answers = drop_coord_answers
 
         self.input_lidar_size = input_lidar_size
 
@@ -250,8 +258,22 @@ class Bench2DriveChatB2DVQADataset(Dataset):
         if not pairs:
             return {"question": "", "answer": ""}
 
+        if self.drop_coord_answers:
+            filtered_pairs = [p for p in pairs if not _COORD_PATTERN.search(p["answer"])]
+            if filtered_pairs:
+                pairs = filtered_pairs
+
         if self.is_training:
-            chosen = random.choice(pairs)
+            mode = self.sample_mode
+            if mode == "first":
+                chosen = pairs[0]
+            elif mode == "mixed":
+                if random.random() < self.sample_first_prob:
+                    chosen = pairs[0]
+                else:
+                    chosen = random.choice(pairs)
+            else:  # default random
+                chosen = random.choice(pairs)
         else:
             chosen = pairs[0]
         return chosen

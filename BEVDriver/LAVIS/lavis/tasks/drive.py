@@ -168,7 +168,9 @@ class BEVQADriveTask(DriveTask):
         num_beams: int = 1,
         max_new_tokens: int = 32,
         top_p: float = 0.9,
+        temperature: float = 1.0,
         repetition_penalty: float = 1.0,
+        min_new_tokens: int = 0,
         skip_generate: bool = False,
         **kwargs,
     ):
@@ -176,8 +178,10 @@ class BEVQADriveTask(DriveTask):
         self.num_beams = num_beams
         self.max_new_tokens = max_new_tokens
         self.top_p = top_p
+        self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.skip_generate = skip_generate
+        self.min_new_tokens = min_new_tokens
 
     @classmethod
     def setup_task(cls, cfg):
@@ -186,7 +190,9 @@ class BEVQADriveTask(DriveTask):
             num_beams=run_cfg.get("num_beams", 1),
             max_new_tokens=run_cfg.get("max_new_tokens", 32),
             top_p=run_cfg.get("top_p", 0.9),
+            temperature=run_cfg.get("temperature", 1.0),
             repetition_penalty=run_cfg.get("repetition_penalty", 1.0),
+            min_new_tokens=run_cfg.get("min_new_tokens", 0),
             skip_generate=run_cfg.get("skip_generate", False),
         )
 
@@ -203,7 +209,9 @@ class BEVQADriveTask(DriveTask):
             max_new_tokens=self.max_new_tokens,
             num_beams=self.num_beams,
             top_p=self.top_p,
+            temperature=self.temperature,
             repetition_penalty=self.repetition_penalty,
+            min_new_tokens=self.min_new_tokens,
         )
 
         refs = samples["vqa_answer"]

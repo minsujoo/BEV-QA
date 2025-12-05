@@ -209,9 +209,14 @@ class BEVQAModel(Blip2Base):
         return vis
 
     def _build_prompt(self, questions: List[str]) -> List[str]:
-        # Keep prompt simple and aligned with training targets.
         return [
-            f"Question: {q}\nAnswer with details about weather, road condition, vehicles, signals, and surroundings:"
+            (
+                "Question: {question}\n"
+                "Answer in 3 sentences covering: "
+                "(1) weather/visibility and road surface, "
+                "(2) lanes/road markings/signs/traffic lights, "
+                "(3) vehicles/pedestrians/obstacles and potential risks."
+            ).format(question=q)
             for q in questions
         ]
 
@@ -309,7 +314,9 @@ class BEVQAModel(Blip2Base):
         max_new_tokens: int = 32,
         num_beams: int = 1,
         top_p: float = 0.9,
+        temperature: float = 1.0,
         repetition_penalty: float = 1.0,
+        min_new_tokens: int = 0,
     ) -> List[str]:
         # NOTE: We implement a custom generation loop instead of relying on
         # `llm_model.generate` because some PEFT + custom LLaMA combinations
@@ -349,11 +356,32 @@ class BEVQAModel(Blip2Base):
         batch_size = prefix_embeds.size(0)
         eos_token_id = self.llm_tokenizer.eos_token_id
         pad_token_id = self.llm_tokenizer.pad_token_id
+        temperature = max(float(temperature), 1e-4)
+        min_new_tokens = max(int(min_new_tokens), 0)
 
         generated_ids = torch.empty(
             batch_size, 0, dtype=torch.long, device=device
         )
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        def apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor, penalty: float):
+            if penalty == 1.0 or generated.numel() == 0:
+                return logits
+            unique_tokens = []
+            for row in generated:
+                unique_tokens.append(row.tolist())
+            # Apply in-place per batch item for efficiency and clarity.
+            for b, tokens in enumerate(unique_tokens):
+                if not tokens:
+                    continue
+                tok_counts = set(tokens)
+                for tok in tok_counts:
+                    val = logits[b, tok]
+                    if val > 0:
+                        logits[b, tok] = val / penalty
+                    else:
+                        logits[b, tok] = val * penalty
+            return logits
 
         for step_idx in range(max_new_tokens):
             if generated_ids.size(1) > 0:
@@ -378,9 +406,11 @@ class BEVQAModel(Blip2Base):
                 return_dict=True,
             )
             logits = outputs.logits[:, -1, :]
+            logits = logits / temperature
+            logits = apply_repetition_penalty(logits, generated_ids, repetition_penalty)
 
-            # Avoid immediate termination on the first step; BOS/EOS share the same id in this setup.
-            if step_idx == 0:
+            # Avoid immediate termination until min_new_tokens is reached; BOS/EOS share the same id in this setup.
+            if step_idx < min_new_tokens:
                 logits[:, eos_token_id] = -1e9
 
             if finished.any():
@@ -411,45 +441,12 @@ class BEVQAModel(Blip2Base):
             if finished.all():
                 break
 
-        full_token_ids = torch.cat(
-            [prompt_tokens.input_ids, generated_ids.to(prompt_tokens.input_ids.device)],
-            dim=1,
-        )
-
-        texts = self.llm_tokenizer.batch_decode(full_token_ids, skip_special_tokens=True)
-        # Strip the leading prompt part if present
+        texts = self.llm_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         cleaned = []
-        for p, t in zip(prompts, texts):
-            # Remove any leading prompt (question/answer) that leaked into the decode.
-            lower_t = t.lower()
-            markers = [
-                "answer in one concise, complete sentence:",
-                "answer:",
-            ]
-            cut_idx = -1
-            for m in markers:
-                pos = lower_t.rfind(m)  # use the last occurrence to be safe
-                if pos >= 0:
-                    cut_idx = pos + len(m)
-                    break
-            if cut_idx >= 0:
-                ans = t[cut_idx:].strip()
-            else:
-                ans = t.strip()
-            ans_raw = ans  # fallback copy before aggressive cleaning
-
-            # Post-process to avoid leading punctuation and trailing fragments.
-            ans = ans.lstrip(" ,.#")
-            for tail in (" and", " a", " the", " of", " to", " in", ","):
-                if ans.endswith(tail):
-                    ans = ans[: -len(tail)].rstrip()
-
-            # Fallback if trimming produced an empty string.
-            if not ans:
-                ans = ans_raw if ans_raw else t.strip()
+        for t in texts:
+            ans = t.strip()
             if not ans:
                 ans = "N/A"
-
             cleaned.append(ans)
         return cleaned
 

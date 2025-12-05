@@ -48,7 +48,11 @@ datasets:
       dev_ratio: 0.5  # or set dev_size: N to use an absolute count
       seed: 42
     # Filter out samples whose answers contain coordinate-like patterns "<x,y>".
-    filter_coord_answers: False
+    filter_coord_answers: True
+    # Training sampling strategy for QA turns.
+    # Options: "random", "first", "mixed" (first with probability train_sample_first_prob).
+    train_sample_mode: "mixed"
+    train_sample_first_prob: 0.7
 
 run:
   task: bevqa_drive
@@ -98,4 +102,7 @@ run:
 
   # Decoding-related defaults for evaluation.
   max_new_tokens: 192
-  top_p: 1.0
+  min_new_tokens: 40
+  top_p: 0.9
+  temperature: 0.7
+  repetition_penalty: 1.1

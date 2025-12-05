@@ -25,3 +25,5 @@ tqdm
 transformers>=4.28.0
 webdataset
 peft
+bert_score
+rouge_score
