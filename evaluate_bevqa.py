@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
@@ -82,9 +83,54 @@ def parse_args() -> argparse.Namespace:
         help="Max tokens to generate per answer (increase to avoid truncation).",
     )
     parser.add_argument(
+        "--min-new-tokens",
+        type=int,
+        default=40,
+        help="Minimum tokens to generate before EOS is allowed (prevents empty answers).",
+    )
+    parser.add_argument(
         "--bert-model",
         default="roberta-large",
         help="Model name for BERTScore (e.g., roberta-large, microsoft/deberta-xlarge-mnli).",
+    )
+    parser.add_argument(
+        "--distributed",
+        action="store_true",
+        help="Enable multi-GPU evaluation by spawning processes (when not using torchrun).",
+    )
+    parser.add_argument(
+        "--no-spice",
+        action="store_true",
+        help="Skip SPICE metric computation (avoids Java dependency errors).",
+    )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=None,
+        help="GPUs per node for spawned distributed evaluation (defaults to CUDA device count).",
+    )
+    parser.add_argument(
+        "--num-nodes",
+        type=int,
+        default=1,
+        help="Number of nodes for spawned distributed evaluation.",
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=0,
+        help="Rank of the current node for spawned distributed evaluation.",
+    )
+    parser.add_argument(
+        "--master-addr",
+        default="127.0.0.1",
+        help="Master address for torch.distributed (spawned mode).",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=12357,
+        help="Master port for torch.distributed (spawned mode).",
     )
     return parser.parse_args()
 
@@ -186,7 +232,47 @@ def compute_metrics(
 
 def main():
     args = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Case 1: launched via torchrun/torch.distributed.run (WORLD_SIZE preset).
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size_env > 1:
+        run_evaluation(args)
+        return
+
+    # Case 2: user requested distributed launch via spawn.
+    if args.distributed:
+        if not torch.cuda.is_available():
+            logging.warning("Distributed evaluation requested but CUDA is unavailable. Running single process.")
+            run_evaluation(args)
+            return
+        num_gpus = args.num_gpus or torch.cuda.device_count()
+        if num_gpus <= 1:
+            logging.warning("Distributed evaluation requested but only one GPU detected. Running single process.")
+            run_evaluation(args)
+            return
+        mp.spawn(_distributed_worker, nprocs=num_gpus, args=(args, num_gpus))
+        return
+
+    # Case 3: plain single-process evaluation.
+    run_evaluation(args)
+
+
+def _distributed_worker(local_rank: int, args: argparse.Namespace, num_gpus: int):
+    world_size = args.num_nodes * num_gpus
+    rank = args.node_rank * num_gpus + local_rank
+
+    os.environ.setdefault("MASTER_ADDR", args.master_addr)
+    os.environ.setdefault("MASTER_PORT", str(args.master_port))
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+
+    run_evaluation(args)
+
+
+def run_evaluation(args: argparse.Namespace):
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     # Distributed setup (torchrun)
     if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
@@ -271,7 +357,11 @@ def main():
         for samples in dataloader:
             samples = move_to_device(samples, device)
 
-            preds = model.generate(samples, max_new_tokens=args.max_new_tokens)
+            preds = model.generate(
+                samples,
+                max_new_tokens=args.max_new_tokens,
+                min_new_tokens=args.min_new_tokens,
+            )
             ids = samples["id"]
             questions = samples["vqa_question"]
             refs = samples["vqa_answer"]
@@ -318,7 +408,7 @@ def main():
         metrics = compute_metrics(
             gts,
             hyps,
-            use_spice=True,
+            use_spice=not args.no_spice,
             use_bertscore=True,
             use_rouge=True,
             bert_model=args.bert_model,

@@ -11,7 +11,7 @@ model:
   max_txt_len: 192
   num_query_token: 32
   has_lora: True
-  first_sentence_only: False
+  first_sentence_only: True
   # Filter out samples whose answers contain coordinate-like patterns "<x,y>".
   # Set to False to keep all samples.
   filter_coord_answers: False
@@ -21,26 +21,25 @@ datasets:
     build_info:
       annotations:
         train:
-          sensor_root: '/home/p112g22/minsu/Bench2Drive_Base'
-          language_root: '/home/p112g22/minsu/Chat-B2D/chat-B2D/train'
+          sensor_root: '/workspace/Bench2Drive_Base'
+          language_root: '/workspace/chat-B2D/train'
           input_rgb_size: 224
           input_multi_view_size: 112
           input_lidar_size: 224
         val:
-          sensor_root: '/home/p112g22/minsu/Bench2Drive_Base'
-          language_root: '/home/p112g22/minsu/Chat-B2D/chat-B2D/val'
+          sensor_root: '/workspace/Bench2Drive_Base'
+          language_root: '/workspace/chat-B2D/val'
           input_rgb_size: 224
           input_multi_view_size: 112
           input_lidar_size: 224
         # Optional held-out test set (fill in actual paths before use).
-        # When populated, enable via run.test_splits: ["test"] or
-        # --options run.test_splits=[\"test\"] on the CLI.
-        test:
-          sensor_root: '/path/to/Bench2Drive_Base_test'
-          language_root: '/path/to/Chat-B2D/chat-B2D/test'
-          input_rgb_size: 224
-          input_multi_view_size: 112
-          input_lidar_size: 224
+        # Leave commented out if unavailable and rely on val_dev/val_test split.
+        # test:
+        #   sensor_root: '/workspace/Bench2Drive_Base_test'
+        #   language_root: '/workspace/chat-B2D/test'
+        #   input_rgb_size: 224
+        #   input_multi_view_size: 112
+        #   input_lidar_size: 224
 
     # Optional: split the provided val set into val_dev / val_test
     # (ratios/size are applied after shuffling with the seed below).
@@ -95,14 +94,14 @@ run:
   test_splits: ["val_test"]
 
   device: "cuda"
-  world_size: 1
+  world_size: 4
   dist_url: "env://"
   distributed: True
   find_unused_parameters: True
 
   # Decoding-related defaults for evaluation.
-  max_new_tokens: 192
-  min_new_tokens: 40
+  max_new_tokens: 64
+  min_new_tokens: 8
   top_p: 0.9
   temperature: 0.7
   repetition_penalty: 1.1

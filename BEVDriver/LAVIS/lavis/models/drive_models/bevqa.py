@@ -212,10 +212,7 @@ class BEVQAModel(Blip2Base):
         return [
             (
                 "Question: {question}\n"
-                "Answer in 3 sentences covering: "
-                "(1) weather/visibility and road surface, "
-                "(2) lanes/road markings/signs/traffic lights, "
-                "(3) vehicles/pedestrians/obstacles and potential risks."
+                "Answer in one concise sentence summarizing what you see."
             ).format(question=q)
             for q in questions
         ]
@@ -364,6 +361,8 @@ class BEVQAModel(Blip2Base):
         )
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
+        neg_inf_value: Optional[float] = None
+
         def apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor, penalty: float):
             if penalty == 1.0 or generated.numel() == 0:
                 return logits
@@ -406,15 +405,17 @@ class BEVQAModel(Blip2Base):
                 return_dict=True,
             )
             logits = outputs.logits[:, -1, :]
+            if neg_inf_value is None:
+                neg_inf_value = torch.finfo(logits.dtype).min
             logits = logits / temperature
             logits = apply_repetition_penalty(logits, generated_ids, repetition_penalty)
 
             # Avoid immediate termination until min_new_tokens is reached; BOS/EOS share the same id in this setup.
             if step_idx < min_new_tokens:
-                logits[:, eos_token_id] = -1e9
+                logits[:, eos_token_id] = neg_inf_value
 
             if finished.any():
-                logits[finished, :] = -1e9
+                logits[finished, :] = neg_inf_value
                 logits[finished, eos_token_id] = 0
 
             if top_p is not None and 0.0 < top_p < 1.0:
