@@ -27,7 +27,7 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Batch BEV-QA eval scheduler.")
     ap.add_argument(
         "--cfg",
-        default="lavis/projects/bevqa/train.yaml",
+        default="/workspace/BEV-QA/BEVDriver/LAVIS/lavis/projects/bevqa/train.yaml",
         help="Config path for bevqa_eval_best.py",
     )
     ap.add_argument(
@@ -44,8 +44,8 @@ def parse_args():
 
 
 def discover_checkpoints() -> List[Path]:
-    paths = sorted(Path("/workspace/BEV-QA/BEVDriver/LAVIS/lavis/out/bevqa").glob("20*/checkpoint_best.pth"))
-    return paths
+    base = Path("/workspace/BEV-QA/BEVDriver/LAVIS/lavis/out/bevqa")
+    return sorted(base.glob("20*/checkpoint_best.pth"))
 
 
 def main():
@@ -77,7 +77,7 @@ def main():
             log_path = Path(f"/workspace/BEV-QA/nohup_eval_{run_dir.name}.log")
             cmd = [
                 "python",
-                "BEVDriver/LAVIS/bevqa_eval_best.py",
+                "/workspace/BEV-QA/BEVDriver/LAVIS/bevqa_eval_best.py",
                 "--cfg-path",
                 args.cfg,
                 "--ckpt-path",

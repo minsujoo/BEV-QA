@@ -58,33 +58,52 @@ answers = model.generate(samples, max_new_tokens=16)
 ```
 
 Training
-- Dataset: Bench2Drive_Base (RGB/LiDAR) + Chat‑B2D (multi‑turn driving QA). See `docs/BEV-QA.md` for the expected folder layout.
-- Loss: token‑level cross‑entropy on answer text (teacher‑forcing).
-- Execution (single GPU example):
+- Dataset: Bench2Drive_Base (RGB/LiDAR) + Chat‑B2D (multi‑turn QA). `val`을 0.5/0.5로 나눠 `val_dev`(검증/early stop) + `val_test`(테스트 대용) 사용. `lavis/projects/bevqa/train.yaml`에서 sensor/language 루트를 `/workspace/Bench2Drive_Base`, `/workspace/chat-B2D/{train,val}`로 설정.
+- 현재 기본 설정: `first_sentence_only=True`, `max_txt_len=192`, 디코딩 `max_new_tokens=64/min_new_tokens=8`, 프롬프트는 단문 요약.
+- 4 GPU 예시:
   ```bash
   conda activate bevdriver
-  cd BEVDriver/LAVIS
-  python -m torch.distributed.run --nproc_per_node=1 --master_port=12345 \
+  cd /workspace/BEV-QA/BEVDriver/LAVIS
+  python -m torch.distributed.run --nproc_per_node=4 --master_port=29500 \
     train.py --cfg-path lavis/projects/bevqa/train.yaml
   ```
-  For multi-GPU training, increase `--nproc_per_node` (e.g., 4) and optionally set `run.world_size` in the config.
 
-Validation / SPICE-style evaluation
-- During training, the `bevqa_drive` task can run validation on the configured split(s) and store `{id, pred, ref}` JSON under `BEVDriver/LAVIS/lavis/out/bevqa/<job_id>/`.
-- After training, you can evaluate a specific checkpoint (e.g., best epoch) with:
+평가 (텍스트 생성 포함)
+- 단일 체크포인트:
   ```bash
-  conda activate bevdriver
-  cd BEVDriver/LAVIS
+  cd /workspace/BEV-QA/BEVDriver/LAVIS
   python bevqa_eval_best.py \
     --cfg-path lavis/projects/bevqa/train.yaml \
     --ckpt-path lavis/out/bevqa/<job_id>/checkpoint_best.pth \
-    --options run.skip_generate=false run.valid_splits=[\"val_dev\"] run.test_splits=[\"val_test\"]
+    --options run.world_size=1 run.distributed=false run.skip_generate=false \
+              run.valid_splits=[] run.test_splits=["val_test"] run.num_workers=0
   ```
-- This writes JSON files such as `val_dev_bevqa_epoch{epoch}.json` and `val_test_bevqa_epoch{epoch}.json` under `BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/`.
-- Run the pseudo-SPICE wrapper on the held‑out split (e.g. `val_test`):
+  결과 JSON은 `lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch*.json`에 저장.
+- 여러 체크포인트 일괄 평가(1 GPU당 순차):
+  ```bash
+  cd /workspace/BEV-QA
+  python BEVDriver/tools/eval/batch_bevqa_eval.py --gpus 0,1,2,3
+  ```
+  로그: `/workspace/BEV-QA/nohup_eval_<run_id>.log`.
+
+지표 계산
+- Pseudo-SPICE(토큰 F1), ROUGE-L, chrF, BERTScore 지원:
   ```bash
   python BEVDriver/tools/eval/spice_eval.py \
-    --file BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch{epoch}.json
+    --file BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch*.json \
+    --metrics pseudo,rougeL,chrf,bertscore \
+    --bert-model microsoft/deberta-base-mnli
+  ```
+  (필요 패키지: `pip install rouge-score sacrebleu bert-score`; 네트워크 불가 시 캐시에 있는 작은 모델로 BERTScore 실행 또는 제외)
+
+시각화
+- 이미지와 예측/정답 텍스트를 PNG로 렌더링:
+  ```bash
+  python BEVDriver/tools/visualize_bevqa.py \
+    --result BEVDriver/LAVIS/lavis/out/bevqa/<eval_job_id>/val_test_bevqa_epoch*.json \
+    --sensor-root /workspace/Bench2Drive_Base \
+    --out-dir /workspace/BEV-QA/vis_bevqa \
+    --num 10 --shuffle
   ```
 
 License and acknowledgements
