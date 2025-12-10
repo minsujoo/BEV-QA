@@ -68,7 +68,7 @@ model = Model.from_config(cfg).cuda()
 - 학습 입력: `{rgb_images, lidar_points, vqa_question, vqa_answer}`
 - 토큰 구성: `bev_tokens` + `question_tokens` → LLM 디코더로 teacher‑forcing
 - 손실: 언어모델링 CrossEntropyLoss(`ignore_index=pad_id`, 1‑토큰 시프트)
-- 추론: `generate()`에서 `bev_tokens`+질문으로 auto‑regressive 답변 생성(beam/top‑p 선택)
+- 추론: `generate()`에서 `bev_tokens`+질문으로 auto‑regressive 답변 생성(top‑p/temperature 샘플링; 빔 서치는 현재 미지원)
 
 예시 시그니처(개념):
 ```python
