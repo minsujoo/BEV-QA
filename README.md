@@ -28,9 +28,7 @@ conda create -n bevdriver python=3.8
 conda activate bevdriver
 pip install -r BEVDriver/requirements.txt
 cd BEVDriver/LAVIS && pip install -r requirements.txt && cd -
-# SPICE/metrics 평가용 추가 의존성
-# - Java 런타임 (SPICE 내부 Stanford CoreNLP 호출): conda install -c conda-forge openjdk   또는   sudo apt-get install -y openjdk-11-jre-headless
-# - 평가 지표: pip install bert_score rouge_score  (requirements에 포함되어 있으므로 설치만 확인)
+# 평가 지표 패키지가 필요하면 `pip install bert_score rouge_score sacrebleu` 로 추가 설치하세요.
 ```
 Notes
 - Use the bundled `LAVIS`/`timm` in this repo; do not `pip install` upstream replacements.
