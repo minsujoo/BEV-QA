@@ -63,6 +63,11 @@ def parse_args():
             "in xxx=yyy format will be merged into config file."
         ),
     )
+    parser.add_argument(
+        "--job-id",
+        default=None,
+        help="Optional job id to reuse an existing run directory (defaults to timestamp).",
+    )
 
     return parser.parse_args()
 
@@ -79,8 +84,8 @@ def setup_seeds(config: Config):
 
 
 def main():
-    job_id = now()
     args = parse_args()
+    job_id = args.job_id or now()
 
     cfg = Config(args)
 
@@ -133,4 +138,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

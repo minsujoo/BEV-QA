@@ -31,9 +31,10 @@ run_seq() {
     local log="${BASE_LOG}_${run_id}.log"
     echo "GPU ${gpu} -> ${ckpt} | log: ${log}"
     CUDA_VISIBLE_DEVICES="${gpu}" TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1 \
-      python BEVDriver/LAVIS/bevqa_eval_best.py \
+      python bevqa_eval_best.py \
         --cfg-path "${CFG}" \
         --ckpt-path "${ckpt}" \
+        --job-id "${run_id}" \
         --options run.world_size=1 run.distributed=false run.skip_generate=false \
                   run.valid_splits=[] run.test_splits="${SPLITS}" run.num_workers=0 \
         > "${log}" 2>&1
