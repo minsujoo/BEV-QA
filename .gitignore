@@ -1,2 +1,18 @@
 BEVDriver/dataset
 BEVDriver/encoder_models
+
+# Ignore pycache & GitHub Action caches
+**/__pycache__/
+__pycache__/
+
+# Ignore evaluation logs / outputs
+nohup*.log
+eval*.log
+bevqa*_metrics.json
+bevqa*_test*.json
+
+# Ignore generated directories
+runs/
+vis_bevqa/
+weights/
+BEVDriver/LAVIS/lavis/out/
