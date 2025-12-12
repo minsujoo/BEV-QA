@@ -16,3 +16,6 @@ runs/
 vis_bevqa/
 weights/
 BEVDriver/LAVIS/lavis/out/
+
+# Don't track AGENTS instructions
+AGENTS.md
