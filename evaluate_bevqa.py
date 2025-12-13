@@ -177,12 +177,68 @@ def compute_metrics(
     gts: Dict,
     hyps: Dict,
     *,
+    use_pseudo_spice: bool = False,
     use_spice: bool = True,
     use_bertscore: bool = True,
     use_rouge: bool = True,
+    use_chrf: bool = False,
     bert_model: str = None,
 ) -> Dict[str, float]:
     metrics = {}
+
+    def _pseudo_spice_f1():
+        import re
+
+        stop_words = {
+            "a",
+            "an",
+            "the",
+            "of",
+            "to",
+            "and",
+            "in",
+            "on",
+            "for",
+            "with",
+            "at",
+            "by",
+            "from",
+            "as",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "this",
+            "that",
+            "these",
+            "those",
+        }
+
+        def tokenize(txt: str):
+            tokens = re.findall(r"[\\w']+", txt.lower())
+            return [t for t in tokens if t not in stop_words]
+
+        f1s = []
+        for k in sorted(gts.keys()):
+            ref = gts[k][0]
+            hyp = hyps[k][0]
+            ref_tokens = set(tokenize(ref))
+            hyp_tokens = set(tokenize(hyp))
+            if not ref_tokens or not hyp_tokens:
+                continue
+            overlap = len(ref_tokens & hyp_tokens)
+            prec = overlap / len(hyp_tokens)
+            rec = overlap / len(ref_tokens)
+            if prec + rec == 0:
+                f1 = 0.0
+            else:
+                f1 = 2 * prec * rec / (prec + rec)
+            f1s.append(f1)
+        return float(sum(f1s) / len(f1s)) if f1s else 0.0
+
+    if use_pseudo_spice:
+        metrics["pseudo_SPICE"] = _pseudo_spice_f1()
 
     if use_spice:
         from pycocoevalcap.spice.spice import Spice
@@ -226,6 +282,19 @@ def compute_metrics(
             scores = [scorer.score(ref, hyp)["rougeL"].fmeasure for ref, hyp in zip(refs, hyps_list)]
             if scores:
                 metrics["ROUGE-L"] = float(sum(scores) / len(scores))
+
+    if use_chrf:
+        try:
+            from sacrebleu.metrics import CHRF
+        except ImportError:
+            logging.warning("sacrebleu is not installed; skipping chrF.")
+        else:
+            chrf = CHRF()
+            keys = sorted(gts.keys())
+            refs = [[gts[k][0] for k in keys]]
+            hyps_list = [hyps[k][0] for k in keys]
+            score = chrf.corpus_score(hyps_list, refs)
+            metrics["chrF"] = float(score.score / 100.0)
 
     return metrics
 

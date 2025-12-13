@@ -27,3 +27,4 @@ webdataset
 peft
 bert_score
 rouge_score
+sacrebleu
