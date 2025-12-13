@@ -41,8 +41,18 @@ Then point `sensor_root` and `language_root` in `lavis/projects/bevqa/train.yaml
 - No checkpoints are auto-downloaded; copy them into the `weights/` folder or update the config paths to your locations.
 
 ### Download checkpoints
-- LLaMA-7B (HuggingFace): https://huggingface.co/huggyllama/llama-7b (observe the model license; place under `weights/llama-7b`).
-- BEVDriver main model checkpoint: https://syncandshare.lrz.de/dl/fiWRzThZRF4xY6DN2Ets7/Model%20Checkpoints/Main%20Model%20Llama-7b/checkpoint_best.pth (place at `weights/bevdriver/checkpoint_best.pth` or update `train.yaml`).
+- LLaMA-7B (HuggingFace): https://huggingface.co/huggyllama/llama-7b (license/terms require login + acceptance).
+  ```bash
+  huggingface-cli download --repo-type model huggyllama/llama-7b --local-dir weights/llama-7b
+  # verify train.yaml: model.llm_model: /workspace/BEV-QA/weights/llama-7b
+  ```
+- BEVDriver main model checkpoint:
+  ```bash
+  mkdir -p weights/bevdriver
+  wget -O weights/bevdriver/checkpoint_best.pth \
+    "https://syncandshare.lrz.de/dl/fiWRzThZRF4xY6DN2Ets7/Model%20Checkpoints/Main%20Model%20Llama-7b/checkpoint_best.pth"
+  # verify train.yaml: model.encoder_model_ckpt: /workspace/BEV-QA/weights/bevdriver/checkpoint_best.pth
+  ```
 
 ## Training
 Edit `train.yaml` for paths (`encoder_model_ckpt`, `llm_model`, data roots). Example (4 GPUs, defaults: seed 42, world_size 4):
